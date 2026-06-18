@@ -1,0 +1,23 @@
+# Secrets — never commit these (would leak Snowflake credentials)
+.env
+*.env
+!.env.example
+# Private keys (key-pair auth)
+*.p8
+*.pem
+*.key
+rsa_key*
+
+# Python env / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
