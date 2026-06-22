@@ -1,24 +1,21 @@
-"""Ground-truth eval fixtures for the agent, against BILLABLE_DATA_BY_JOB_DESCRIPTION.
+"""Ground-truth eval fixtures for the agent, against the live Billable Data table.
 
 Each case pairs a natural-language `question` with a `ground_truth_sql`. The runner
 computes the expected value by executing `ground_truth_sql` directly, then asserts the
 agent's returned value matches. The expected values are therefore live ground truth,
 not hardcoded guesses.
 
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │ CONFIRM THESE COLUMN NAMES against the real table before running the eval.│
-  │ They are inferred from the table name and WILL need editing if wrong.      │
-  │ Run `uv run pytest -k print_schema -s -m integration` to list the columns. │
-  └──────────────────────────────────────────────────────────────────────────┘
+Identifiers are confirmed against the real table. The table name and several columns
+are quoted identifiers (spaces / mixed case), so they must be referenced with double
+quotes in SQL; the questions name them explicitly so the agent can resolve them.
 """
 
 from dataclasses import dataclass
 
-TABLE = "BILLABLE_DATA_BY_JOB_DESCRIPTION"
+TABLE = 'PUBLIC."Billable Data by Job Description"'
 
-# --- columns to confirm against the live table ---
-COL_AMOUNT = "BILLABLE_AMOUNT"      # a numeric column to SUM / filter on
-COL_CATEGORY = "JOB_DESCRIPTION"    # a categorical column to GROUP BY / count distinct
+COL_AMOUNT = '"Bill Rate"'      # numeric column to SUM / filter on
+COL_CATEGORY = '"Client Name"'  # categorical column to GROUP BY / count distinct
 
 
 @dataclass(frozen=True)
@@ -33,40 +30,43 @@ CASES: list[EvalCase] = [
     EvalCase(
         name="row_count",
         kind="count",
-        question="How many rows are in the billable data table?",
+        question=f'How many rows are in the table {TABLE}?',
         ground_truth_sql=f"SELECT COUNT(*) FROM {TABLE}",
     ),
     EvalCase(
-        name="distinct_job_descriptions",
+        name="distinct_clients",
         kind="distinct",
-        question="How many distinct job descriptions are there in the billable data?",
+        question=f'In {TABLE}, how many distinct values are in the {COL_CATEGORY} column?',
         ground_truth_sql=f"SELECT COUNT(DISTINCT {COL_CATEGORY}) FROM {TABLE}",
     ),
     EvalCase(
-        name="total_billable_amount",
+        name="total_bill_rate",
         kind="sum",
-        question="What is the total billable amount across all rows?",
+        question=f'In {TABLE}, what is the total (sum) of the {COL_AMOUNT} column?',
         ground_truth_sql=f"SELECT SUM({COL_AMOUNT}) FROM {TABLE}",
     ),
     EvalCase(
-        name="rows_with_positive_amount",
+        name="rows_with_positive_bill_rate",
         kind="filter",
-        question="How many rows have a billable amount greater than zero?",
+        question=f'In {TABLE}, how many rows have {COL_AMOUNT} greater than zero?',
         ground_truth_sql=f"SELECT COUNT(*) FROM {TABLE} WHERE {COL_AMOUNT} > 0",
     ),
     EvalCase(
-        name="top_job_description_by_rows",
+        name="top_client_by_rows",
         kind="group_by",
-        question="Which job description appears in the most rows?",
+        question=f'In {TABLE}, which {COL_CATEGORY} appears in the most rows?',
         ground_truth_sql=(
             f"SELECT {COL_CATEGORY} FROM {TABLE} "
             f"GROUP BY {COL_CATEGORY} ORDER BY COUNT(*) DESC, {COL_CATEGORY} LIMIT 1"
         ),
     ),
     EvalCase(
-        name="highest_total_amount_for_one_job",
+        name="highest_total_bill_rate_for_one_client",
         kind="group_by",
-        question="What is the highest total billable amount for any single job description?",
+        question=(
+            f'In {TABLE}, what is the highest total {COL_AMOUNT} '
+            f'for any single {COL_CATEGORY}?'
+        ),
         ground_truth_sql=(
             f"SELECT SUM({COL_AMOUNT}) AS s FROM {TABLE} "
             f"GROUP BY {COL_CATEGORY} ORDER BY s DESC LIMIT 1"
