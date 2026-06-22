@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "snowflake-connector-python>=3.12",
     "cryptography>=42",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,7 @@ packages = ["src/sf_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "integration: hits a live Snowflake warehouse; skipped when creds are absent",
 ]

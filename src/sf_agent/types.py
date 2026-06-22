@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class QueryResult(BaseModel):
@@ -46,3 +46,17 @@ class ToolResult(BaseModel):
             err = self.error
             payload = {"error": err.type if err else "unknown", "message": err.message if err else ""}
         return json.dumps(payload, default=str)
+
+
+class AgentAnswer(BaseModel):
+    """Structured, auditable result of one agent run.
+
+    `value` is the headline figure the question asked for (what the eval harness
+    asserts on); `executed_sql` is every query the loop ran, in order, so an answer
+    can be traced back to the data that produced it.
+    """
+
+    answer: str
+    value: Any = None
+    values: dict[str, Any] = Field(default_factory=dict)
+    executed_sql: list[str] = Field(default_factory=list)

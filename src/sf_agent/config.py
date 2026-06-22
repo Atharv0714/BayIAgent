@@ -13,6 +13,7 @@ class SnowflakeConfig(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     account: str = Field(validation_alias="SNOWFLAKE_ACCOUNT")
@@ -27,3 +28,19 @@ class SnowflakeConfig(BaseSettings):
     role: str = Field(validation_alias="SNOWFLAKE_ROLE")
 
     row_cap: int = Field(default=1000, gt=0, validation_alias="SF_ROW_CAP")
+
+
+class AgentConfig(BaseSettings):
+    """Config for the Anthropic tool-use agent loop, loaded from env / .env."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    api_key: str = Field(validation_alias="ANTHROPIC_API_KEY")
+    model: str = Field(default="claude-sonnet-4-6", validation_alias="AGENT_MODEL")
+    max_rounds: int = Field(default=5, gt=0, validation_alias="AGENT_MAX_ROUNDS")
+    max_tokens: int = Field(default=1024, gt=0, validation_alias="AGENT_MAX_TOKENS")

@@ -1,7 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from sf_agent.config import SnowflakeConfig
+from sf_agent.agent import SnowflakeAgent
+from sf_agent.config import AgentConfig, SnowflakeConfig
 from sf_agent.connection import SnowflakeConnection
 from sf_agent.tools.run_sql import RunSqlTool
 
@@ -24,3 +25,17 @@ def connection(sf_config: SnowflakeConfig):
 @pytest.fixture()
 def run_sql(connection) -> RunSqlTool:
     return RunSqlTool(connection)
+
+
+@pytest.fixture(scope="session")
+def agent_config() -> AgentConfig:
+    """Agent config (needs ANTHROPIC_API_KEY); skip the eval suite if absent."""
+    try:
+        return AgentConfig()  # type: ignore[call-arg]
+    except ValidationError:
+        pytest.skip("ANTHROPIC_API_KEY not configured; skipping agent eval tests")
+
+
+@pytest.fixture()
+def agent(connection, agent_config: AgentConfig) -> SnowflakeAgent:
+    return SnowflakeAgent(tools=[RunSqlTool(connection)], config=agent_config)

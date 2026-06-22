@@ -10,30 +10,53 @@ can be swapped for a Cortex Analyst tool without touching the loop.
 
 ## Status
 
-**Chunk 1 (this commit):** typed config, key-pair connection, a single `run_sql` tool,
-and integration tests against `BILLABLE_DATA_BY_JOB_DESCRIPTION`. No agent loop yet.
+**Chunk 1:** typed config, key-pair connection, a single `run_sql` tool, integration
+tests against `BILLABLE_DATA_BY_JOB_DESCRIPTION`.
+
+**Chunk 2 (this commit):** Anthropic tool-use agent loop over the chunk-1 `Tool`
+protocol (`run_sql` is the only registered tool; the cortex_analyst seam is untouched),
+a grounding system prompt, a structured auditable `AgentAnswer`, and an eval harness
+that asserts the agent's value against live ground truth. Offline loop tests pass with
+no creds; the live eval is the done-condition (see below).
 
 ## Layout
 
 ```
 src/sf_agent/
-  config.py        SnowflakeConfig — typed, env-loaded (pydantic-settings)
+  config.py        SnowflakeConfig + AgentConfig — typed, env-loaded
   connection.py    key-pair connection lifecycle + query execution → QueryResult
   sql_guard.py     read-only guard for untrusted (model-generated) SQL
-  types.py         QueryResult / ToolError / ToolResult (Pydantic v2)
+  prompts.py       grounding system prompt for the agent
+  types.py         QueryResult / ToolError / ToolResult / AgentAnswer (Pydantic v2)
+  agent.py         SnowflakeAgent — Anthropic tool-use loop
   tools/
     base.py        Tool protocol the agent loop depends on
     run_sql.py     RunSqlTool — wraps the connection, captures SQL + elapsed_ms
 tests/
-  test_sql_guard.py    unit, no Snowflake needed
+  test_sql_guard.py    unit, no creds
+  test_agent_loop.py   unit, no creds (stub Anthropic client + stub tool)
   test_connection.py   integration
   test_run_sql.py      integration
+  eval_fixtures.py     ground-truth eval cases (CONFIRM column constants)
+  test_evals.py        integration eval harness (the done-condition)
+  test_schema.py       integration helper: prints the table's columns
+```
+
+## Running the agent eval (done-condition)
+
+Needs Snowflake creds AND `ANTHROPIC_API_KEY` in `.env`. The eval computes each expected
+value live from `ground_truth_sql`, runs the agent, and asserts the value matches.
+
+```bash
+# 1. confirm the real column names, then edit COL_AMOUNT / COL_CATEGORY in eval_fixtures.py
+uv run pytest -k print_schema -s -m integration
+# 2. run the eval
+uv run pytest -m integration -k evals -v
 ```
 
 ## Setup
 
 ```bash
-cd snowflake-agent
 uv sync --extra dev
 cp .env.example .env   # fill in account, user, key path, warehouse/db/schema/role
 ```
