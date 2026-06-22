@@ -1,12 +1,13 @@
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class SnowflakeConfig(BaseSettings):
     """Typed Snowflake connection config, loaded from env / .env.
 
-    Auth is key-pair only: provide a PEM private key path (+ passphrase if the key
-    is encrypted). No password field exists by design.
+    Exactly one auth method must be supplied: either a password
+    (SNOWFLAKE_PASSWORD) or a key-pair (SNOWFLAKE_PRIVATE_KEY_PATH, plus an
+    optional passphrase). Blank values count as unset.
     """
 
     model_config = SettingsConfigDict(
@@ -18,7 +19,10 @@ class SnowflakeConfig(BaseSettings):
 
     account: str = Field(min_length=1, validation_alias="SNOWFLAKE_ACCOUNT")
     user: str = Field(min_length=1, validation_alias="SNOWFLAKE_USER")
-    private_key_path: str = Field(min_length=1, validation_alias="SNOWFLAKE_PRIVATE_KEY_PATH")
+    password: str | None = Field(default=None, validation_alias="SNOWFLAKE_PASSWORD")
+    private_key_path: str | None = Field(
+        default=None, validation_alias="SNOWFLAKE_PRIVATE_KEY_PATH"
+    )
     private_key_passphrase: str | None = Field(
         default=None, validation_alias="SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"
     )
@@ -28,6 +32,21 @@ class SnowflakeConfig(BaseSettings):
     role: str = Field(min_length=1, validation_alias="SNOWFLAKE_ROLE")
 
     row_cap: int = Field(default=1000, gt=0, validation_alias="SF_ROW_CAP")
+
+    @field_validator("password", "private_key_path", "private_key_passphrase", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def _exactly_one_auth_method(self) -> "SnowflakeConfig":
+        if bool(self.password) == bool(self.private_key_path):
+            raise ValueError(
+                "set exactly one of SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH"
+            )
+        return self
 
 
 class AgentConfig(BaseSettings):

@@ -25,7 +25,8 @@ def _load_private_key(path: str, passphrase: str | None) -> bytes:
 
 
 class SnowflakeConnection:
-    """Key-pair Snowflake connection with a thin `execute` that returns QueryResult.
+    """Snowflake connection (password or key-pair) with a thin `execute` that
+    returns QueryResult.
 
     Use as a context manager:
 
@@ -39,15 +40,24 @@ class SnowflakeConnection:
 
     def connect(self) -> "SnowflakeConnection":
         cfg = self._config
-        pkb = _load_private_key(cfg.private_key_path, cfg.private_key_passphrase or None)
+        auth: dict[str, object]
+        if cfg.password:
+            auth = {"password": cfg.password}
+        else:
+            assert cfg.private_key_path is not None  # guaranteed by config validation
+            auth = {
+                "private_key": _load_private_key(
+                    cfg.private_key_path, cfg.private_key_passphrase or None
+                )
+            }
         self._conn = snowflake.connector.connect(
             account=cfg.account,
             user=cfg.user,
-            private_key=pkb,
             warehouse=cfg.warehouse,
             database=cfg.database,
             schema=cfg.schema_name,
             role=cfg.role,
+            **auth,
         )
         return self
 
