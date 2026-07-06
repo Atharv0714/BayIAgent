@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BayOne Snowflake Query Agent</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1e2740; --border: #2a3550;
+    --text: #e6ecf5; --muted: #93a1bd; --accent: #4f8cff; --accent2: #2bd4a7;
+    --danger: #ff6b6b; --code: #0b1020;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+  textarea, select {
+    width: 100%; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px; padding: 11px 12px; font: inherit;
+  }
+  textarea { resize: vertical; min-height: 68px; }
+  .row { display: flex; gap: 12px; margin-top: 14px; align-items: flex-end; }
+  .row > div:first-child { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .examples { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .chip:hover { color: var(--text); border-color: var(--accent); }
+  #result { margin-top: 22px; }
+  .hidden { display: none; }
+  .answer { font-size: 17px; margin: 0 0 14px; }
+  .badge {
+    display: inline-block; background: rgba(43,212,167,.12); color: var(--accent2);
+    border: 1px solid rgba(43,212,167,.35); border-radius: 8px; padding: 6px 12px;
+    font-weight: 700; font-size: 18px; margin-bottom: 14px;
+  }
+  .klabel { color: var(--muted); font-size: 13px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { border-bottom: 1px solid var(--border); padding: 6px 4px; }
+  td.k { color: var(--muted); }
+  pre {
+    background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; overflow-x: auto; font-size: 13px; margin: 6px 0 0; white-space: pre-wrap;
+  }
+  .err { color: var(--danger); }
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.35);
+    border-top-color: #fff; border-radius: 50%; display: inline-block; vertical-align: -2px;
+    animation: spin .7s linear infinite; margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BayOne Snowflake Query Agent</h1>
+  <p class="sub">Ask a question about the warehouse. Every number comes from a live query — the SQL that produced it is shown below the answer.</p>
+
+  <div class="card">
+    <label for="q">Question</label>
+    <textarea id="q" placeholder="e.g. How many distinct clients are there?"></textarea>
+
+    <div class="row">
+      <div>
+        <label for="tool">Query method</label>
+        <select id="tool"></select>
+        <div class="note" id="toolNote"></div>
+      </div>
+      <button id="ask">Ask</button>
+    </div>
+
+    <div class="examples" id="examples">
+      <span class="chip">How many placement rows are there in total?</span>
+      <span class="chip">How many distinct clients are there?</span>
+      <span class="chip">What is the total bill rate across all placements?</span>
+      <span class="chip">Which client has the most placement rows?</span>
+    </div>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const qEl = $("#q"), toolEl = $("#tool"), askBtn = $("#ask"), resultEl = $("#result"), noteEl = $("#toolNote");
+
+async function loadTools() {
+  const r = await fetch("/api/tools");
+  const data = await r.json();
+  toolEl.innerHTML = "";
+  for (const t of data.tools) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.label + (t.available ? "" : " — unavailable");
+    opt.disabled = !t.available;
+    if (!t.available) opt.dataset.reason = t.reason || "not configured";
+    toolEl.appendChild(opt);
+  }
+  // Select the first available tool.
+  const firstAvail = data.tools.find((t) => t.available);
+  if (firstAvail) toolEl.value = firstAvail.id;
+  updateNote();
+}
+
+function updateNote() {
+  const opt = toolEl.selectedOptions[0];
+  noteEl.textContent = opt && opt.disabled ? opt.dataset.reason : "";
+}
+
+function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function render(data) {
+  if (!data.ok) {
+    resultEl.innerHTML = `<div class="card err">${esc(data.error)}</div>`;
+    return;
+  }
+  let html = `<div class="card">`;
+  if (data.value !== null && data.value !== undefined && data.value !== "")
+    html += `<div class="badge">${esc(data.value)}</div>`;
+  html += `<p class="answer">${esc(data.answer)}</p>`;
+
+  const vals = data.values || {};
+  if (Object.keys(vals).length) {
+    html += `<div class="klabel">Supporting values</div><table>`;
+    for (const [k, v] of Object.entries(vals))
+      html += `<tr><td class="k">${esc(k)}</td><td>${esc(v)}</td></tr>`;
+    html += `</table>`;
+  }
+
+  const sql = data.executed_sql || [];
+  html += `<div class="klabel">Executed SQL (${sql.length})</div>`;
+  html += sql.length ? sql.map((s) => `<pre>${esc(s)}</pre>`).join("") : `<div class="note">No SQL was run.</div>`;
+  html += `<div class="note">via ${esc(data.tool)}</div></div>`;
+  resultEl.innerHTML = html;
+}
+
+async function ask() {
+  const question = qEl.value.trim();
+  if (!question) { qEl.focus(); return; }
+  askBtn.disabled = true;
+  resultEl.innerHTML = `<div class="card"><span class="spinner"></span>Querying the warehouse…</div>`;
+  try {
+    const r = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, tool: toolEl.value }),
+    });
+    render(await r.json());
+  } catch (e) {
+    resultEl.innerHTML = `<div class="card err">Request failed: ${esc(e.message)}</div>`;
+  } finally {
+    askBtn.disabled = false;
+  }
+}
+
+askBtn.addEventListener("click", ask);
+qEl.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") ask(); });
+toolEl.addEventListener("change", updateNote);
+$("#examples").addEventListener("click", (e) => {
+  if (e.target.classList.contains("chip")) { qEl.value = e.target.textContent; qEl.focus(); }
+});
+loadTools();
+</script>
+</body>
+</html>

@@ -17,6 +17,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 
 [build-system]
 requires = ["hatchling"]
