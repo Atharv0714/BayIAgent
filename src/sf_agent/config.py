@@ -63,3 +63,41 @@ class AgentConfig(BaseSettings):
     model: str = Field(default="claude-sonnet-4-6", validation_alias="AGENT_MODEL")
     max_rounds: int = Field(default=5, gt=0, validation_alias="AGENT_MAX_ROUNDS")
     max_tokens: int = Field(default=1024, gt=0, validation_alias="AGENT_MAX_TOKENS")
+
+
+class CortexConfig(BaseSettings):
+    """Config for the Cortex Analyst REST tool, loaded from env / .env.
+
+    Auth to the Analyst REST API is a Programmatic Access Token (PAT) — separate
+    from the SQL connection's auth. The generated SQL is still executed over the
+    normal SnowflakeConnection, so this only needs the REST endpoint bits.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    account: str = Field(min_length=1, validation_alias="SNOWFLAKE_ACCOUNT")
+    pat: str = Field(min_length=1, validation_alias="SNOWFLAKE_PAT")
+    semantic_view: str = Field(min_length=1, validation_alias="CORTEX_SEMANTIC_VIEW")
+    timeout_s: float = Field(default=60.0, gt=0, validation_alias="CORTEX_TIMEOUT_S")
+
+    @field_validator("pat", "semantic_view", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v: object) -> object:
+        # Blank -> None so a half-filled .env raises ValidationError (skips cleanly)
+        # rather than sending an empty token / view name to the API.
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    @property
+    def base_url(self) -> str:
+        return f"https://{self.account}.snowflakecomputing.com"
+
+    @property
+    def message_url(self) -> str:
+        return f"{self.base_url}/api/v2/cortex/analyst/message"

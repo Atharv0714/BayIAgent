@@ -22,8 +22,9 @@ COL_CATEGORY = '"Client Name"'  # categorical column to GROUP BY / count distinc
 class EvalCase:
     name: str
     kind: str  # count | distinct | sum | filter | group_by
-    question: str
+    question: str        # raw-SQL phrasing (names the table/columns) for run_sql
     ground_truth_sql: str
+    nl_question: str     # business phrasing for the Cortex Analyst semantic layer
 
 
 CASES: list[EvalCase] = [
@@ -32,24 +33,28 @@ CASES: list[EvalCase] = [
         kind="count",
         question=f'How many rows are in the table {TABLE}?',
         ground_truth_sql=f"SELECT COUNT(*) FROM {TABLE}",
+        nl_question="How many placement rows are there in total?",
     ),
     EvalCase(
         name="distinct_clients",
         kind="distinct",
         question=f'In {TABLE}, how many distinct values are in the {COL_CATEGORY} column?',
         ground_truth_sql=f"SELECT COUNT(DISTINCT {COL_CATEGORY}) FROM {TABLE}",
+        nl_question="How many distinct clients are there?",
     ),
     EvalCase(
         name="total_bill_rate",
         kind="sum",
         question=f'In {TABLE}, what is the total (sum) of the {COL_AMOUNT} column?',
         ground_truth_sql=f"SELECT SUM({COL_AMOUNT}) FROM {TABLE}",
+        nl_question="What is the total bill rate across all placements?",
     ),
     EvalCase(
         name="rows_with_positive_bill_rate",
         kind="filter",
         question=f'In {TABLE}, how many rows have {COL_AMOUNT} greater than zero?',
         ground_truth_sql=f"SELECT COUNT(*) FROM {TABLE} WHERE {COL_AMOUNT} > 0",
+        nl_question="How many placements have a bill rate greater than zero?",
     ),
     EvalCase(
         name="top_client_by_rows",
@@ -59,6 +64,7 @@ CASES: list[EvalCase] = [
             f"SELECT {COL_CATEGORY} FROM {TABLE} "
             f"GROUP BY {COL_CATEGORY} ORDER BY COUNT(*) DESC, {COL_CATEGORY} LIMIT 1"
         ),
+        nl_question="Which client has the most placement rows?",
     ),
     EvalCase(
         name="highest_total_bill_rate_for_one_client",
@@ -71,5 +77,6 @@ CASES: list[EvalCase] = [
             f"SELECT SUM({COL_AMOUNT}) AS s FROM {TABLE} "
             f"GROUP BY {COL_CATEGORY} ORDER BY s DESC LIMIT 1"
         ),
+        nl_question="What is the highest total bill rate for any single client?",
     ),
 ]

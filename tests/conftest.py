@@ -2,8 +2,9 @@ import pytest
 from pydantic import ValidationError
 
 from sf_agent.agent import SnowflakeAgent
-from sf_agent.config import AgentConfig, SnowflakeConfig
+from sf_agent.config import AgentConfig, CortexConfig, SnowflakeConfig
 from sf_agent.connection import SnowflakeConnection
+from sf_agent.tools.cortex_analyst import CortexAnalystTool
 from sf_agent.tools.run_sql import RunSqlTool
 
 
@@ -39,3 +40,20 @@ def agent_config() -> AgentConfig:
 @pytest.fixture()
 def agent(connection, agent_config: AgentConfig) -> SnowflakeAgent:
     return SnowflakeAgent(tools=[RunSqlTool(connection)], config=agent_config)
+
+
+@pytest.fixture(scope="session")
+def cortex_config() -> CortexConfig:
+    """Cortex Analyst config (needs SNOWFLAKE_PAT + CORTEX_SEMANTIC_VIEW); skip if absent."""
+    try:
+        return CortexConfig()  # type: ignore[call-arg]
+    except ValidationError:
+        pytest.skip("SNOWFLAKE_PAT / CORTEX_SEMANTIC_VIEW not configured; skipping Cortex tests")
+
+
+@pytest.fixture()
+def cortex_agent(connection, agent_config: AgentConfig, cortex_config: CortexConfig) -> SnowflakeAgent:
+    """An agent whose only tool is Cortex Analyst — proves the loop is tool-agnostic."""
+    return SnowflakeAgent(
+        tools=[CortexAnalystTool(connection, cortex_config)], config=agent_config
+    )

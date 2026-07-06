@@ -10,6 +10,7 @@ dependencies = [
     "snowflake-connector-python>=3.12",
     "cryptography>=42",
     "anthropic>=0.40",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
