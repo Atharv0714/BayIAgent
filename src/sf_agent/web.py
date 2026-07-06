@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,9 @@ class _State:
     connection: SnowflakeConnection | None = None
     agents: dict[str, SnowflakeAgent] = {}
     errors: dict[str, str] = {}  # tool -> why it's unavailable
+    # session_id -> running message history (SDK content blocks), kept server-side
+    # so follow-ups can analyze data already fetched in earlier turns.
+    conversations: dict[str, list[Any]] = {}
 
 
 STATE = _State()
@@ -98,6 +102,7 @@ app = FastAPI(title="BayOne Snowflake Query Agent", lifespan=lifespan)
 class AskRequest(BaseModel):
     question: str
     tool: str = "run_sql"
+    session_id: str | None = None
 
 
 @app.get("/")
@@ -134,9 +139,15 @@ def ask(req: AskRequest) -> JSONResponse:
             {"ok": False, "error": f"Tool '{req.tool}' is unavailable: {reason}"}, status_code=400
         )
 
+    # Continue an existing chat, or start a new one. History is kept server-side so a
+    # follow-up ("now analyze that") sees the earlier turns and their fetched rows.
+    session_id = req.session_id or uuid.uuid4().hex
+
     try:
         with _LOCK:
-            answer = agent.ask(question)
+            history = STATE.conversations.get(session_id, [])
+            answer, updated = agent.converse(history, question)
+            STATE.conversations[session_id] = updated
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
         return JSONResponse({"ok": False, "error": f"The agent could not answer: {e}"}, status_code=502)
@@ -147,6 +158,7 @@ def ask(req: AskRequest) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
+            "session_id": session_id,
             "tool": req.tool,
             "answer": answer.answer,
             "value": answer.value,
@@ -154,6 +166,14 @@ def ask(req: AskRequest) -> JSONResponse:
             "executed_sql": answer.executed_sql,
         }
     )
+
+
+@app.post("/api/reset")
+def reset(req: AskRequest) -> JSONResponse:
+    """Drop a chat's server-side history so its memory is freed (New chat)."""
+    if req.session_id:
+        STATE.conversations.pop(req.session_id, None)
+    return JSONResponse({"ok": True})
 
 
 def main() -> None:

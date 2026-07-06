@@ -58,7 +58,24 @@ class SnowflakeAgent:
         self._client = client or anthropic.Anthropic(api_key=config.api_key)
 
     def ask(self, question: str) -> AgentAnswer:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+        """Single-shot: answer `question` with no prior context."""
+        answer, _ = self.converse([], question)
+        return answer
+
+    def converse(
+        self, history: list[dict[str, Any]], question: str
+    ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
+        """Answer `question` in the context of a prior message `history`.
+
+        Returns the answer and the full updated message list (including this turn's
+        tool calls, tool results, and the final assistant reply). Pass that list
+        back as `history` on the next turn to keep the conversation — and the data
+        rows already fetched — in context, so a follow-up can analyze earlier output
+        without re-querying. The message list holds the SDK's own content blocks, so
+        keep it server-side rather than serializing it.
+        """
+        messages: list[dict[str, Any]] = list(history)
+        messages.append({"role": "user", "content": question})
         tool_specs = [_tool_spec(t) for t in self._tools.values()]
         executed_sql: list[str] = []
 
@@ -113,7 +130,7 @@ class SnowflakeAgent:
                 executed_sql=executed_sql,
             )
             logger.info("agent answered value=%r after %d queries", answer.value, len(executed_sql))
-            return answer
+            return answer, messages
 
         raise AgentError(
             f"agent did not produce a final answer within {self._config.max_rounds} rounds"
