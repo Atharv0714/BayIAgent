@@ -13,6 +13,14 @@ from sf_agent.types import AgentAnswer
 
 logger = logging.getLogger("sf_agent.agent")
 
+# Sent back when the model narrates without calling a tool or emitting the final
+# JSON, to pull it back onto the protocol instead of failing the turn.
+_PROTOCOL_REMINDER = (
+    "Do not narrate your next step. Either call a tool now to fetch the data you "
+    "need, or, if you already have it, reply with ONLY the final JSON object described "
+    "in the system prompt — no prose, no code fences."
+)
+
 
 class AgentError(RuntimeError):
     """Raised when the loop cannot produce a parseable final answer."""
@@ -122,7 +130,26 @@ class SnowflakeAgent:
                 continue
 
             text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
-            data = _extract_json(text)
+            try:
+                data = _extract_json(text)
+            except AgentError:
+                # The model replied with prose but neither called a tool nor emitted
+                # the final JSON (e.g. "Let me get the list:" then stopped, or asked a
+                # clarifying question). If rounds remain, nudge it back on protocol and
+                # let it recover; on the final (tool-withheld) round, surface the prose
+                # as a best-effort answer rather than 502-ing the caller.
+                if allow_tools:
+                    messages.append({"role": "user", "content": _PROTOCOL_REMINDER})
+                    continue
+                answer = AgentAnswer(
+                    answer=text.strip() or "The agent could not produce an answer.",
+                    value=None,
+                    values={},
+                    executed_sql=executed_sql,
+                )
+                logger.info("agent returned non-JSON prose after %d queries", len(executed_sql))
+                return answer, messages
+
             answer = AgentAnswer(
                 answer=str(data.get("answer", "")),
                 value=data.get("value"),

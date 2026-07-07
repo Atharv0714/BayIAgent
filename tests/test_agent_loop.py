@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from sf_agent.agent import AgentError, SnowflakeAgent
+from sf_agent.agent import SnowflakeAgent
 from sf_agent.config import AgentConfig
 from sf_agent.types import QueryResult, ToolResult
 
@@ -117,16 +117,34 @@ def test_final_round_withholds_tools_to_force_answer() -> None:
     assert "tools" not in client.messages.calls[1]
 
 
-def test_round_cap_raises_when_model_never_answers() -> None:
-    # Empty script -> StubMessages keeps returning tool_use forever.
+def test_round_cap_returns_graceful_answer_when_model_never_answers() -> None:
+    # Empty script -> StubMessages keeps returning tool_use forever; the model never
+    # emits final JSON. On the tool-withheld final round the loop still terminates
+    # with a best-effort answer (value=None) instead of raising.
     client = StubClient([])
     agent = SnowflakeAgent(tools=[StubRunSql()], config=_config(max_rounds=3), client=client)
 
-    with pytest.raises(AgentError):
-        agent.ask("q")
+    answer = agent.ask("q")
 
+    assert answer.value is None
     # max_rounds tool rounds + 1 forced-answer round = 4 model calls.
     assert len(client.messages.calls) == 4
+
+
+def test_prose_without_json_is_nudged_back_onto_protocol() -> None:
+    # Round 0: the model narrates ("Let me fetch it:") with no tool call and no JSON.
+    # The loop should nudge it and continue rather than failing; round 1 then answers.
+    scripted = [
+        _response([_text_block("Sure — let me fetch that for you:")], "end_turn"),
+        _response([_text_block('{"answer": "done", "value": 5, "values": {}}')], "end_turn"),
+    ]
+    client = StubClient(scripted)
+    agent = SnowflakeAgent(tools=[StubRunSql()], config=_config(max_rounds=3), client=client)
+
+    answer = agent.ask("q")
+
+    assert answer.value == 5
+    assert len(client.messages.calls) == 2
 
 
 def test_unknown_tool_returns_error_to_model() -> None:

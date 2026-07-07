@@ -61,8 +61,8 @@ class AgentConfig(BaseSettings):
 
     api_key: str = Field(validation_alias="ANTHROPIC_API_KEY")
     model: str = Field(default="claude-sonnet-4-6", validation_alias="AGENT_MODEL")
-    max_rounds: int = Field(default=5, gt=0, validation_alias="AGENT_MAX_ROUNDS")
-    max_tokens: int = Field(default=1024, gt=0, validation_alias="AGENT_MAX_TOKENS")
+    max_rounds: int = Field(default=8, gt=0, validation_alias="AGENT_MAX_ROUNDS")
+    max_tokens: int = Field(default=4096, gt=0, validation_alias="AGENT_MAX_TOKENS")
 
 
 class CortexConfig(BaseSettings):
