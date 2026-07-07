@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import snowflake.connector
@@ -7,6 +8,12 @@ from cryptography.hazmat.primitives import serialization
 
 from sf_agent.config import SnowflakeConfig
 from sf_agent.types import QueryResult
+
+logger = logging.getLogger("sf_agent.connection")
+
+# Snowflake error codes that mean "the session is gone, open a new one":
+# expired auth token, and session-no-longer-exists.
+_EXPIRED_SESSION_ERRNOS = {390114, 390104, 390108, 390195}
 
 
 def _load_private_key(path: str, passphrase: str | None) -> bytes:
@@ -57,6 +64,9 @@ class SnowflakeConnection:
             database=cfg.database,
             schema=cfg.schema_name,
             role=cfg.role,
+            # Long-running server: heartbeat the session so its auth token is renewed
+            # instead of expiring while idle (Snowflake error 390114).
+            client_session_keep_alive=True,
             **auth,
         )
         return self
@@ -75,12 +85,26 @@ class SnowflakeConnection:
     def execute(self, sql: str, max_rows: int | None = None) -> QueryResult:
         """Run `sql` and return up to `max_rows` (default: config.row_cap) rows.
 
-        Fetches one extra row past the cap to detect (and flag) truncation.
+        Fetches one extra row past the cap to detect (and flag) truncation. If the
+        Snowflake session has expired, reconnects once and retries so a stale token
+        doesn't surface as a hard error to the caller.
         """
         if self._conn is None:
             raise RuntimeError("connection is not open; call connect() or use as context manager")
 
         cap = max_rows if max_rows is not None else self._config.row_cap
+        try:
+            return self._run(sql, cap)
+        except snowflake.connector.errors.Error as e:
+            if getattr(e, "errno", None) not in _EXPIRED_SESSION_ERRNOS:
+                raise
+            logger.warning("snowflake session expired (errno=%s); reconnecting and retrying", e.errno)
+            self.close()
+            self.connect()
+            return self._run(sql, cap)
+
+    def _run(self, sql: str, cap: int) -> QueryResult:
+        assert self._conn is not None
         cur = self._conn.cursor()
         try:
             cur.execute(sql)
