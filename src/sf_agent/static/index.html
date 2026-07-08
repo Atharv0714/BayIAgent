@@ -124,6 +124,19 @@ const EXAMPLES = [
 ];
 
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+// A supporting value can be a scalar, a list, a row object, or a list of row
+// objects — render each shape readably instead of letting String() print "[object Object]".
+function fmtObj(o) { return Object.entries(o).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(", "); }
+function fmtVal(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (Array.isArray(v)) {
+    if (!v.length) return "—";
+    return v.map((item) => (item && typeof item === "object") ? fmtObj(item) : esc(item)).join("<br>");
+  }
+  if (typeof v === "object") return fmtObj(v);
+  return esc(v);
+}
 function save() {
   if (sessionId) localStorage.setItem(LS_SESSION, sessionId); else localStorage.removeItem(LS_SESSION);
   localStorage.setItem(LS_MSGS, JSON.stringify(messages));
@@ -152,7 +165,7 @@ function botInner(d) {
   const vals = d.values || {};
   if (Object.keys(vals).length) {
     html += `<div class="klabel">Supporting values</div><table>`;
-    for (const [k, v] of Object.entries(vals)) html += `<tr><td class="k">${esc(k)}</td><td>${esc(v)}</td></tr>`;
+    for (const [k, v] of Object.entries(vals)) html += `<tr><td class="k">${esc(k)}</td><td>${fmtVal(v)}</td></tr>`;
     html += `</table>`;
   }
   const sql = d.executed_sql || [];
