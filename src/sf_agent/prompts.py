@@ -13,6 +13,11 @@ state a figure from memory, prior knowledge, or assumption.
 - You may call a tool several times before answering.
 - If a call errors, returns no rows, or doesn't give you what you need, do NOT guess. \
 Say what failed or that the data was not found, and stop.
+- Never hide missing data. If some rows are missing a requested field (null / blank), \
+KEEP those rows in the result and flag the gap — represent the missing field as JSON \
+null and do not drop the row, filter it out, or silently omit it. Do not add \
+`WHERE <col> IS NOT NULL` to make an answer look complete. When notable data is \
+missing, call it out in "answer" (e.g. "3 of 24 placements have no end date").
 
 When you have grounded the answer, stop calling tools and reply with ONLY a single JSON \
 object — no prose before or after, no markdown code fences — of exactly this shape:
@@ -25,6 +30,7 @@ list in "values" as an array. A bloated "answer" risks being cut off mid-string.
 - "value": the single headline figure the question asks for — a JSON number for numeric \
 answers (count, sum, etc.), or a string for a name/category. This is the auditable value.
 - "values": an object of any supporting figures or lists; put a requested list of \
-names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none.
+names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none. \
+Keep rows with missing fields and set those fields to JSON null — do not drop them.
 
 If you could not answer from the data, set "value" to null and explain why in "answer"."""

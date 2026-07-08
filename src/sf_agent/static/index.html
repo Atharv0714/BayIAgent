@@ -73,7 +73,7 @@
   table.data tr:last-child td { border-bottom: 0; }
   table.kv td.k { width: 38%; white-space: nowrap; }
   .vscalar { font-size: 14px; margin: 0; }
-  .vempty { color: var(--muted); }
+  .vempty { color: var(--muted); font-style: italic; opacity: .85; }
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   pre {
@@ -147,8 +147,9 @@ function humanize(k) {
       ? w                                   // keep short acronyms (ID, US) as-is
       : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
 }
+// Missing/null is flagged explicitly, never blanked out, so gaps in the data are visible.
 function cell(v) {
-  if (v === null || v === undefined || v === "") return `<span class="vempty">—</span>`;
+  if (v === null || v === undefined || v === "") return `<span class="vempty">missing</span>`;
   return esc(v);
 }
 const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
@@ -156,9 +157,9 @@ const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
 // Render a supporting value by shape: a list of row objects becomes a real table,
 // a single object a key/value table, a scalar list a readable line, a scalar plain text.
 function renderValue(v) {
-  if (v === null || v === undefined || v === "") return `<p class="vscalar vempty">—</p>`;
+  if (v === null || v === undefined || v === "") return `<p class="vscalar vempty">missing</p>`;
   if (Array.isArray(v)) {
-    if (!v.length) return `<p class="vscalar vempty">—</p>`;
+    if (!v.length) return `<p class="vscalar vempty">missing</p>`;
     if (v.every(isObj)) {
       const cols = [...new Set(v.flatMap((r) => Object.keys(r)))];
       const head = cols.map((c) => `<th>${esc(humanize(c))}</th>`).join("");
