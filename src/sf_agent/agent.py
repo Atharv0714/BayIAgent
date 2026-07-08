@@ -21,6 +21,17 @@ _PROTOCOL_REMINDER = (
     "in the system prompt — no prose, no code fences."
 )
 
+# Injected on the final round, where tools are withheld to force termination. Without
+# this the model tends to summarize its findings in prose (which _extract_json then
+# rejects, yielding value=None); this makes the JSON-only contract explicit at the
+# one moment it matters most.
+_FINAL_ANSWER_INSTRUCTION = (
+    "You cannot call any more tools. Using only the data already gathered above, reply "
+    "now with ONLY the final JSON object described in the system prompt — no prose, no "
+    "code fences. Put any list of names or supporting figures inside \"values\"; keep "
+    "\"answer\" to one or two sentences."
+)
+
 
 class AgentError(RuntimeError):
     """Raised when the loop cannot produce a parseable final answer."""
@@ -91,6 +102,11 @@ class SnowflakeAgent:
         # model is forced to answer (guarantees termination).
         for round_i in range(self._config.max_rounds + 1):
             allow_tools = round_i < self._config.max_rounds
+
+            # On the final (tool-withheld) round, explicitly demand the JSON answer;
+            # otherwise the model tends to summarize in prose and lose the value.
+            if not allow_tools:
+                messages.append({"role": "user", "content": _FINAL_ANSWER_INSTRUCTION})
 
             kwargs: dict[str, Any] = {
                 "model": self._config.model,

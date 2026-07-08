@@ -2,7 +2,9 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-TARGET_TABLE = "BILLABLE_DATA_BY_JOB_DESCRIPTION"
+# Quoted identifier: the loaded table's name has spaces and mixed case, so it must
+# be double-quoted in SQL (unquoted BILLABLE_DATA_BY_JOB_DESCRIPTION does not exist).
+TARGET_TABLE = '"Billable Data by Job Description"'
 
 
 def test_count_is_grounded(run_sql) -> None:

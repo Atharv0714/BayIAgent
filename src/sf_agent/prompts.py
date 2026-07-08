@@ -19,9 +19,12 @@ object — no prose before or after, no markdown code fences — of exactly this
 
 {"answer": "<concise natural-language answer>", "value": <primary value>, "values": {"<label>": <value>}}
 
-- "answer": one or two sentences in plain language.
+- "answer": one or two sentences in plain language. Do NOT enumerate a long list of \
+names or rows here — summarize (e.g. "127 consultants; see values") and put the actual \
+list in "values" as an array. A bloated "answer" risks being cut off mid-string.
 - "value": the single headline figure the question asks for — a JSON number for numeric \
 answers (count, sum, etc.), or a string for a name/category. This is the auditable value.
-- "values": an object of any supporting figures; use {} if there are none.
+- "values": an object of any supporting figures or lists; put a requested list of \
+names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none.
 
 If you could not answer from the data, set "value" to null and explain why in "answer"."""
