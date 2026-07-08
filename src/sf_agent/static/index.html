@@ -99,7 +99,17 @@
   }
   textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,58,237,.18); }
   .hint { max-width: 820px; margin: 0 auto; padding: 0 20px 10px; color: var(--muted); font-size: 11px; }
+
+  /* Charts */
+  .chartwrap {
+    position: relative; height: 300px; margin-top: 6px; padding: 10px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+  }
+  .charterr { color: var(--muted); font-size: 13px; font-style: italic; padding: 6px 2px; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@sgratzl/chartjs-chart-boxplot@4.2.4/build/index.umd.min.js"></script>
 </head>
 <body>
 <header>
@@ -129,6 +139,12 @@ const LS_SESSION = "sf_session_id", LS_MSGS = "sf_messages";
 let sessionId = localStorage.getItem(LS_SESSION) || null;
 let messages = JSON.parse(localStorage.getItem(LS_MSGS) || "[]"); // [{role, ...}]
 let busy = false;
+
+// Chart rendering state. botInner emits a <canvas> and queues its spec; charts are
+// instantiated after the message is in the DOM (Chart.js needs a mounted canvas).
+const INK = "#1e1630", MUTED = "#6b6480", GRID = "rgba(30,22,48,.09)";
+const CHART_COLORS = ["#7c3aed","#d6249f","#a855f7","#ec4899","#6366f1","#c026d3","#8b5cf6","#f472b6","#4f46e5","#db2777"];
+let chartSeq = 0, pendingCharts = [], chartInstances = {};
 
 const EXAMPLES = [
   "How many distinct clients are there?",
@@ -175,6 +191,79 @@ function renderValue(v) {
   }
   return `<p class="vscalar">${esc(v)}</p>`;
 }
+
+// Map the agent's normalized chart spec {type, title, labels, series, ...} to a
+// Chart.js config. Colors follow the violet/magenta theme.
+function chartConfig(spec) {
+  const t = String(spec.type || "bar").toLowerCase();
+  const labels = spec.labels || [];
+  const series = spec.series || [];
+  const pal = CHART_COLORS;
+  const wantLegend = series.length > 1 || ["pie", "doughnut", "treemap"].includes(t);
+  const plugins = {
+    legend: { display: wantLegend, labels: { color: MUTED } },
+    title: { display: !!spec.title, text: spec.title || "", color: INK, font: { size: 14 } },
+  };
+  const axes = {
+    x: { title: { display: !!spec.x_label, text: spec.x_label || "", color: MUTED }, ticks: { color: MUTED }, grid: { color: GRID } },
+    y: { beginAtZero: true, title: { display: !!spec.y_label, text: spec.y_label || "", color: MUTED }, ticks: { color: MUTED }, grid: { color: GRID } },
+  };
+  const base = { responsive: true, maintainAspectRatio: false, plugins };
+
+  if (t === "pie" || t === "doughnut") {
+    return { type: t, data: { labels, datasets: [{ data: (series[0] || {}).data || [], backgroundColor: labels.map((_, i) => pal[i % pal.length]), borderColor: "#fff", borderWidth: 1 }] }, options: base };
+  }
+  if (t === "treemap") {
+    const data = (series[0] || {}).data || [];
+    return {
+      type: "treemap",
+      data: { datasets: [{ tree: labels.map((l, i) => ({ _l: l, _v: Number(data[i]) || 0 })), key: "_v",
+        backgroundColor: (c) => pal[(c.dataIndex || 0) % pal.length],
+        labels: { display: true, color: "#fff", formatter: (c) => (c.raw && c.raw._data ? c.raw._data._l : "") } }] },
+      options: { ...base, plugins: { ...plugins, legend: { display: false } } },
+    };
+  }
+  if (t === "scatter" || t === "bubble") {
+    return { type: t, data: { datasets: series.map((s, i) => ({ label: s.name || `Series ${i + 1}`, data: s.data || [], backgroundColor: pal[i % pal.length] })) }, options: { ...base, scales: axes } };
+  }
+  if (t === "box") {
+    return { type: "boxplot", data: { labels: labels.length ? labels : series.map((s, i) => s.name || `Box ${i + 1}`),
+      datasets: series.map((s, i) => ({ label: s.name || `Box ${i + 1}`, data: s.data || [], backgroundColor: pal[i % pal.length] + "55", borderColor: pal[i % pal.length] })) },
+      options: { ...base, scales: axes } };
+  }
+  // bar / column / line / area / histogram
+  const isLine = t === "line" || t === "area";
+  const histo = t === "histogram";
+  return {
+    type: isLine ? "line" : "bar",
+    data: { labels, datasets: series.map((s, i) => ({
+      label: s.name || `Series ${i + 1}`,
+      data: s.data || [],
+      backgroundColor: isLine ? pal[i % pal.length] + "33" : pal[i % pal.length],
+      borderColor: pal[i % pal.length],
+      borderWidth: isLine ? 2 : 0,
+      fill: t === "area",
+      tension: isLine ? 0.25 : 0,
+      categoryPercentage: histo ? 1 : 0.8,
+      barPercentage: histo ? 1 : 0.9,
+    })) },
+    options: { ...base, scales: axes },
+  };
+}
+
+// Instantiate every queued chart now that its canvas is mounted. A bad spec or a
+// missing CDN degrades to a small note; it never blanks the surrounding message.
+function flushCharts() {
+  const queued = pendingCharts; pendingCharts = [];
+  for (const { id, spec } of queued) {
+    const cv = document.getElementById(id);
+    if (!cv) continue;
+    if (typeof Chart === "undefined") { cv.closest(".chartwrap").innerHTML = `<div class="charterr">Chart library unavailable (offline).</div>`; continue; }
+    try { chartInstances[id] = new Chart(cv.getContext("2d"), chartConfig(spec)); }
+    catch (e) { const w = cv.closest(".chartwrap"); if (w) w.innerHTML = `<div class="charterr">Could not render chart: ${esc(e.message)}</div>`; }
+  }
+}
+
 function save() {
   if (sessionId) localStorage.setItem(LS_SESSION, sessionId); else localStorage.removeItem(LS_SESSION);
   localStorage.setItem(LS_MSGS, JSON.stringify(messages));
@@ -200,6 +289,11 @@ function botInner(d) {
   if (d.value !== null && d.value !== undefined && d.value !== "")
     html += `<div class="badge">${esc(d.value)}</div>`;
   html += `<p class="answer">${esc(d.answer)}</p>`;
+  if (d.chart && typeof d.chart === "object") {
+    const id = `chart_${chartSeq++}`;
+    pendingCharts.push({ id, spec: d.chart });
+    html += `<div class="klabel">Visualization</div><div class="chartwrap"><canvas id="${id}"></canvas></div>`;
+  }
   const vals = d.values || {};
   if (Object.keys(vals).length) {
     html += `<div class="klabel">Supporting values</div>`;
@@ -229,6 +323,9 @@ function renderMessage(m) {
 }
 
 function renderAll() {
+  // Full redraw: tear down existing charts so their canvases (about to be removed) don't leak.
+  for (const id in chartInstances) { try { chartInstances[id].destroy(); } catch (e) {} }
+  chartInstances = {}; pendingCharts = [];
   threadEl.innerHTML = "";
   if (!messages.length) {
     const e = document.createElement("div");
@@ -239,6 +336,7 @@ function renderAll() {
     return;
   }
   for (const m of messages) threadEl.appendChild(renderMessage(m));
+  flushCharts();
   scrollDown();
 }
 

@@ -22,7 +22,7 @@ missing, call it out in "answer" (e.g. "3 of 24 placements have no end date").
 When you have grounded the answer, stop calling tools and reply with ONLY a single JSON \
 object — no prose before or after, no markdown code fences — of exactly this shape:
 
-{"answer": "<concise natural-language answer>", "value": <primary value>, "values": {"<label>": <value>}}
+{"answer": "<concise natural-language answer>", "value": <primary value>, "values": {"<label>": <value>}, "chart": <chart spec or null>}
 
 - "answer": one or two sentences in plain language. Do NOT enumerate a long list of \
 names or rows here — summarize (e.g. "127 consultants; see values") and put the actual \
@@ -32,5 +32,23 @@ answers (count, sum, etc.), or a string for a name/category. This is the auditab
 - "values": an object of any supporting figures or lists; put a requested list of \
 names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none. \
 Keep rows with missing fields and set those fields to JSON null — do not drop them.
+
+- "chart": when the data supports a visualization, include a chart spec grounded in \
+the rows you pulled; otherwise set it to null. Do NOT chart a single scalar, a one-row \
+lookup, or a plain yes/no. Every number in the chart MUST come from a tool result — \
+never invent points to fill it out. Choose the type that fits the data's shape:
+  - comparison across categories -> "bar" (or "column")
+  - trend over time -> "line" (or "area")
+  - parts of a whole -> "pie", "doughnut", or "treemap"
+  - relationship between two numeric fields -> "scatter" (or "bubble" for a third)
+  - distribution of one numeric field -> "histogram" (bins) or "box"
+The chart spec shape is:
+{"type": "bar", "title": "<short>", "x_label": "<label>", "y_label": "<label>",
+ "labels": ["A", "B", ...], "series": [{"name": "<series>", "data": [<numbers>]}]}
+  - For pie/doughnut/treemap: one series; "labels" are the slice names, series "data" the sizes.
+  - For scatter/bubble: omit "labels"; each series "data" is [{"x": <n>, "y": <n>}] \
+(bubble adds "r"). For histogram: "labels" are bin ranges, series "data" the counts. \
+For box: each series "data" is a list of raw numbers (one list per box).
+Keep charts to the values that matter (e.g. top ~20 categories); don't emit hundreds of bars.
 
 If you could not answer from the data, set "value" to null and explain why in "answer"."""

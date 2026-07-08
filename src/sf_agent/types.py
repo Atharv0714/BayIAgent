@@ -60,3 +60,7 @@ class AgentAnswer(BaseModel):
     value: Any = None
     values: dict[str, Any] = Field(default_factory=dict)
     executed_sql: list[str] = Field(default_factory=list)
+    # Optional visualization spec grounded in the pulled rows. None when the data
+    # doesn't lend itself to a chart (e.g. a single scalar or a plain lookup). Shape
+    # is a normalized {type, title, labels, series, ...} the web UI maps to Chart.js.
+    chart: dict[str, Any] | None = None

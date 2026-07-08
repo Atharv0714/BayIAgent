@@ -164,6 +164,7 @@ def ask(req: AskRequest) -> JSONResponse:
             "value": answer.value,
             "values": answer.values,
             "executed_sql": answer.executed_sql,
+            "chart": answer.chart,
         }
     )
 

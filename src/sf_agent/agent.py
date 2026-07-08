@@ -166,13 +166,20 @@ class SnowflakeAgent:
                 logger.info("agent returned non-JSON prose after %d queries", len(executed_sql))
                 return answer, messages
 
+            chart = data.get("chart")
             answer = AgentAnswer(
                 answer=str(data.get("answer", "")),
                 value=data.get("value"),
                 values=data.get("values") or {},
                 executed_sql=executed_sql,
+                chart=chart if isinstance(chart, dict) else None,
             )
-            logger.info("agent answered value=%r after %d queries", answer.value, len(executed_sql))
+            logger.info(
+                "agent answered value=%r chart=%s after %d queries",
+                answer.value,
+                answer.chart.get("type") if answer.chart else None,
+                len(executed_sql),
+            )
             return answer, messages
 
         raise AgentError(
