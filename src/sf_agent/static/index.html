@@ -76,6 +76,8 @@
   .vempty { color: var(--muted); font-style: italic; opacity: .85; }
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .diag table { margin-top: 8px; font-size: 12.5px; }
+  .diag td { padding: 5px 9px; }
   pre {
     background: var(--code); border: 1px solid var(--border); border-radius: 8px;
     padding: 11px; overflow-x: auto; font-size: 12.5px; margin: 8px 0 0; white-space: pre-wrap;
@@ -158,13 +160,23 @@ const EXAMPLES = [
 
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
+// Known abbreviations that should stay upper-case in labels (ordinary all-caps
+// field words like "CANDIDATE" are still Title-cased; only these are kept as acronyms).
+const ACRONYMS = new Set([
+  "ID","SOW","PO","PTO","USA","US","UK","EU","HPE","KPI","SLA","API","SQL","URL","SSN",
+  "DOB","ZIP","HR","IT","QA","VP","CEO","CTO","CFO","CIO","B2B","B2C","AI","ML","FTE",
+  "JD","EIN","W2","C2C","PII","CRM","ERP","SKU","YOY","MOM","YTD","MTD","NDA","RFP","RFQ",
+]);
 // Turn a raw field key ("CANDIDATE FULL NAME", "solutions_case_study") into an
-// English label ("Candidate Full Name", "Solutions Case Study").
+// English label ("Candidate Full Name", "Solutions Case Study"), keeping acronyms upper.
 function humanize(k) {
   return String(k).replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim()
-    .split(" ").map((w) => w.length <= 2 && w === w.toUpperCase()
-      ? w                                   // keep short acronyms (ID, US) as-is
-      : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+    .split(" ").map((w) => {
+      const up = w.toUpperCase();
+      if (ACRONYMS.has(up)) return up;                     // keep genuine acronyms upper
+      if (w.length <= 2 && w === up) return w;             // short all-caps token (fallback)
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(" ");
 }
 // Missing/null is flagged explicitly, never blanked out, so gaps in the data are visible.
 function cell(v) {
@@ -309,8 +321,35 @@ function botInner(d) {
     html += sql.map((s) => `<pre>${esc(s)}</pre>`).join("");
     html += `</details>`;
   }
-  html += `<div class="meta">via ${esc(d.tool || "agent")}</div>`;
+  html += diagnostics(d);
   return html;
+}
+
+// Format a USD cost that is usually a fraction of a cent.
+function fmtCost(c) {
+  if (c == null) return null;
+  if (c === 0) return "$0.00";
+  if (c < 0.0001) return "<$0.0001";
+  return "$" + c.toFixed(c < 0.01 ? 4 : 2);
+}
+
+// Small collapsible diagnostics panel at the bottom of each answer: how long it
+// took, which tables it drew from, tokens used, and estimated cost.
+function diagnostics(d) {
+  const rows = [];
+  if (typeof d.elapsed_ms === "number")
+    rows.push(["Time taken", (d.elapsed_ms / 1000).toFixed(1) + " s"]);
+  const src = (d.sources && d.sources.length) ? d.sources.join(", ") : (d.tool || "agent");
+  rows.push(["Source", src]);
+  const tk = d.tokens || {};
+  if (tk.total)
+    rows.push(["Tokens used", `${tk.total.toLocaleString()} total — ${(tk.input || 0).toLocaleString()} in, `
+      + `${(tk.output || 0).toLocaleString()} out, ${((tk.cache_read || 0) + (tk.cache_write || 0)).toLocaleString()} cache`]);
+  const cost = fmtCost(d.cost_usd);
+  if (cost) rows.push(["Token cost", cost]);
+  const body = rows.map(([k, v]) => `<tr><td class="k">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
+  return `<details class="diag"><summary>Diagnostics · via ${esc(d.tool || "agent")}</summary>`
+    + `<table class="data kv"><tbody>${body}</tbody></table></details>`;
 }
 
 function renderMessage(m) {

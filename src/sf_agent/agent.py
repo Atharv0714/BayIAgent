@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from typing import Any
 
 import anthropic
@@ -46,8 +48,54 @@ class AgentError(RuntimeError):
 _CACHE_CONTROL = {"type": "ephemeral"}
 
 
+# claude-sonnet-4-6 list pricing, USD per million tokens. Used only to show an
+# estimated per-answer cost in the UI diagnostics; if AGENT_MODEL is changed this
+# becomes an approximation.
+_PRICE_PER_MTOK = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}
+
+# Pull the table after FROM/JOIN — either a quoted identifier ("Billable Data ...")
+# or a bare dotted name (schema.table) — to report which sources an answer drew from.
+_TABLE_RE = re.compile(r'\b(?:FROM|JOIN)\s+("[^"]+"|[A-Za-z_][\w$.]*)', re.IGNORECASE)
+
+# A `SELECT * ... LIMIT <=5` is the agent peeking at a table's shape, not the query
+# that produced the answer — excluded from the reported source for that reason.
+_SELECT_STAR_RE = re.compile(r"select\s+\*", re.IGNORECASE)
+_LIMIT_RE = re.compile(r"\blimit\s+(\d+)", re.IGNORECASE)
+
+
+def _is_discovery(sql: str) -> bool:
+    if not _SELECT_STAR_RE.search(sql or ""):
+        return False
+    m = _LIMIT_RE.search(sql)
+    return bool(m) and int(m.group(1)) <= 5
+
+
 def _tool_spec(tool: Tool) -> dict[str, Any]:
     return {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+
+
+def _estimate_cost(usage: dict[str, int]) -> float:
+    return round(sum(usage.get(k, 0) / 1_000_000 * p for k, p in _PRICE_PER_MTOK.items()), 6)
+
+
+def _extract_sources(sqls: list[str]) -> list[str]:
+    """Distinct data tables referenced across the executed SQL, in first-seen order.
+
+    Catalog probes (information_schema) and shape-peeking `SELECT * LIMIT 5` queries
+    are omitted so the reported source is the actual data the answer drew from, not
+    the tables the agent browsed to find it.
+    """
+    seen: list[str] = []
+    for sql in sqls:
+        if _is_discovery(sql):
+            continue
+        for m in _TABLE_RE.finditer(sql or ""):
+            name = m.group(1).strip('"')
+            if "information_schema" in name.lower():
+                continue
+            if name not in seen:
+                seen.append(name)
+    return seen
 
 
 def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
@@ -116,6 +164,17 @@ class SnowflakeAgent:
         answer, _ = self.converse([], question)
         return answer
 
+    @staticmethod
+    def _attach_diag(
+        answer: AgentAnswer, start: float, usage: dict[str, int], source_sql: list[str]
+    ) -> AgentAnswer:
+        """Record timing, token usage/cost, and data sources onto the answer."""
+        answer.elapsed_ms = (time.perf_counter() - start) * 1000
+        answer.tokens = {**usage, "total": sum(usage.values())}
+        answer.cost_usd = _estimate_cost(usage)
+        answer.sources = _extract_sources(source_sql)
+        return answer
+
     def converse(
         self, history: list[dict[str, Any]], question: str
     ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
@@ -128,6 +187,7 @@ class SnowflakeAgent:
         without re-querying. The message list holds the SDK's own content blocks, so
         keep it server-side rather than serializing it.
         """
+        start = time.perf_counter()
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": question})
         tool_specs = [_tool_spec(t) for t in self._tools.values()]
@@ -140,6 +200,9 @@ class SnowflakeAgent:
             {"type": "text", "text": SYSTEM_PROMPT, "cache_control": dict(_CACHE_CONTROL)}
         ]
         executed_sql: list[str] = []
+        # Only successful, non-discovery queries — used to report the real data source
+        # (so a failed table probe or a `SELECT * LIMIT 5` peek isn't shown as a source).
+        source_sql: list[str] = []
         usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
         # max_rounds query rounds + 1 final round where tools are withheld so the
@@ -186,6 +249,8 @@ class SnowflakeAgent:
                         result = tool.run(**tu.input)
                         if result.executed_sql:
                             executed_sql.append(result.executed_sql)
+                            if result.ok:
+                                source_sql.append(result.executed_sql)
                         content = result.to_model_text()
                         is_error = not result.ok
                     tool_results.append(
@@ -217,6 +282,7 @@ class SnowflakeAgent:
                     values={},
                     executed_sql=executed_sql,
                 )
+                self._attach_diag(answer, start, usage, source_sql)
                 logger.info(
                     "agent returned non-JSON prose after %d queries; tokens=%s",
                     len(executed_sql), usage,
@@ -231,6 +297,7 @@ class SnowflakeAgent:
                 executed_sql=executed_sql,
                 chart=chart if isinstance(chart, dict) else None,
             )
+            self._attach_diag(answer, start, usage, source_sql)
             logger.info(
                 "agent answered value=%r chart=%s after %d queries; tokens=%s",
                 answer.value,

@@ -165,6 +165,10 @@ def ask(req: AskRequest) -> JSONResponse:
             "values": answer.values,
             "executed_sql": answer.executed_sql,
             "chart": answer.chart,
+            "elapsed_ms": answer.elapsed_ms,
+            "tokens": answer.tokens,
+            "cost_usd": answer.cost_usd,
+            "sources": answer.sources,
         }
     )
 

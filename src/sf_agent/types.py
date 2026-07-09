@@ -64,3 +64,9 @@ class AgentAnswer(BaseModel):
     # doesn't lend itself to a chart (e.g. a single scalar or a plain lookup). Shape
     # is a normalized {type, title, labels, series, ...} the web UI maps to Chart.js.
     chart: dict[str, Any] | None = None
+
+    # Run diagnostics, surfaced in the UI's per-answer diagnostics panel.
+    elapsed_ms: float = 0.0  # wall-clock time to produce this answer
+    tokens: dict[str, int] = Field(default_factory=dict)  # input/output/cache_*/total
+    cost_usd: float = 0.0  # estimated model cost for this answer
+    sources: list[str] = Field(default_factory=list)  # data tables the SQL drew from

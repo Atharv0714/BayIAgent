@@ -24,9 +24,15 @@ object — no prose before or after, no markdown code fences — of exactly this
 
 {"answer": "<concise natural-language answer>", "value": <primary value>, "values": {"<label>": <value>}, "chart": <chart spec or null>}
 
-- "answer": one or two sentences in plain language. Do NOT enumerate a long list of \
-names or rows here — summarize (e.g. "127 consultants; see values") and put the actual \
-list in "values" as an array. A bloated "answer" risks being cut off mid-string.
+- "answer": ALWAYS lead with a one or two sentence plain-language summary of the \
+result — this is the summary shown at the top of every response, before the detailed \
+output. Do NOT enumerate a long list of names or rows here — summarize (e.g. "127 \
+consultants; see values") and put the actual list in "values" as an array. A bloated \
+"answer" risks being cut off mid-string.
+- Write every abbreviation or acronym in ALL CAPITALS wherever it appears (in "answer", \
+"values", chart titles and labels) — e.g. SQL, API, ID, SOW, PO, PTO, USA, HPE, KPI, \
+SLA — even when the source data spells it differently. Do not capitalize ordinary \
+words this way; only genuine abbreviations/acronyms.
 - "value": the single headline figure the question asks for — a JSON number for numeric \
 answers (count, sum, etc.), or a string for a name/category. This is the auditable value.
 - "values": an object of any supporting figures or lists; put a requested list of \
