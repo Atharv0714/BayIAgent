@@ -110,11 +110,14 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@sgratzl/chartjs-chart-boxplot@4.2.4/build/index.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 </head>
 <body>
 <header>
   <h1>BayOne Snowflake Query Agent <span class="sub">— grounded, with chat memory</span></h1>
   <select id="tool" title="Query method"></select>
+  <button id="pdfBtn" title="Download the whole conversation as a PDF">Download PDF</button>
   <button id="newChat">New chat</button>
 </header>
 
@@ -132,7 +135,7 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), toolEl = $("#tool"), newChatBtn = $("#newChat");
+const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), toolEl = $("#tool"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
 const mainEl = document.querySelector("main");
 
 const LS_SESSION = "sf_session_id", LS_MSGS = "sf_messages";
@@ -326,6 +329,7 @@ function renderAll() {
   // Full redraw: tear down existing charts so their canvases (about to be removed) don't leak.
   for (const id in chartInstances) { try { chartInstances[id].destroy(); } catch (e) {} }
   chartInstances = {}; pendingCharts = [];
+  pdfBtn.disabled = !messages.length; // nothing to export on an empty chat
   threadEl.innerHTML = "";
   if (!messages.length) {
     const e = document.createElement("div");
@@ -372,6 +376,50 @@ async function send() {
   qEl.focus();
 }
 
+// Rasterize the whole thread (charts and tables included) and slice it into an
+// A4 PDF the user can save. html2canvas captures the element's full scroll height,
+// so the entire conversation is exported, not just what's on screen.
+async function downloadPdf() {
+  if (busy || !messages.length) return;
+  if (typeof html2canvas === "undefined" || !window.jspdf) {
+    alert("PDF libraries are unavailable (offline). Reconnect and reload to export.");
+    return;
+  }
+  const prev = pdfBtn.textContent;
+  pdfBtn.disabled = true; pdfBtn.textContent = "Preparing…";
+  const wasBottom = mainEl.scrollTop; // restore scroll after capture
+  try {
+    const bg = getComputedStyle(document.body).backgroundColor || "#faf8ff";
+    const canvas = await html2canvas(threadEl, {
+      backgroundColor: bg, scale: 2, useCORS: true, windowWidth: threadEl.scrollWidth,
+    });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: "pt", format: "a4" });
+    const margin = 24;
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW - margin * 2;
+    const ratio = imgW / canvas.width;              // canvas px -> pdf pt
+    const sliceH = Math.floor((pageH - margin * 2) / ratio); // source px per page
+    let y = 0, page = 0;
+    while (y < canvas.height) {
+      const h = Math.min(sliceH, canvas.height - y);
+      const slice = document.createElement("canvas");
+      slice.width = canvas.width; slice.height = h;
+      slice.getContext("2d").drawImage(canvas, 0, y, canvas.width, h, 0, 0, canvas.width, h);
+      if (page > 0) pdf.addPage();
+      pdf.addImage(slice.toDataURL("image/png"), "PNG", margin, margin, imgW, h * ratio);
+      y += h; page++;
+    }
+    pdf.save(`bayone-chat-${new Date().toISOString().slice(0, 10)}.pdf`);
+  } catch (e) {
+    alert("Could not generate PDF: " + (e && e.message ? e.message : e));
+  } finally {
+    pdfBtn.textContent = prev; pdfBtn.disabled = !messages.length;
+    mainEl.scrollTop = wasBottom;
+  }
+}
+
 async function newChat() {
   if (sessionId) {
     try { await fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: "", session_id: sessionId }) }); } catch {}
@@ -383,6 +431,7 @@ function autosize() { qEl.style.height = "auto"; qEl.style.height = Math.min(qEl
 
 sendBtn.addEventListener("click", send);
 newChatBtn.addEventListener("click", newChat);
+pdfBtn.addEventListener("click", downloadPdf);
 qEl.addEventListener("input", autosize);
 qEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 threadEl.addEventListener("click", (e) => {
