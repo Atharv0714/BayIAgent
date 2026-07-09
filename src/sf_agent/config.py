@@ -31,7 +31,10 @@ class SnowflakeConfig(BaseSettings):
     schema_name: str = Field(min_length=1, validation_alias="SNOWFLAKE_SCHEMA")
     role: str = Field(min_length=1, validation_alias="SNOWFLAKE_ROLE")
 
-    row_cap: int = Field(default=1000, gt=0, validation_alias="SF_ROW_CAP")
+    # Rows fed back to the model per query. Kept modest because every fetched row
+    # is serialized into the tool result and re-sent across the loop's rounds, so a
+    # large cap multiplies token cost; 200 still covers realistic full-list answers.
+    row_cap: int = Field(default=200, gt=0, validation_alias="SF_ROW_CAP")
 
     @field_validator("password", "private_key_path", "private_key_passphrase", mode="before")
     @classmethod

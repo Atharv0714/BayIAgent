@@ -37,8 +37,43 @@ class AgentError(RuntimeError):
     """Raised when the loop cannot produce a parseable final answer."""
 
 
+# Prompt-caching marker. The system prompt and tool specs are byte-identical on
+# every round, and the message history (including the large row payloads returned
+# by earlier queries) only grows — so without caching each round re-bills the
+# entire accumulated prefix in full, which is what drove one question past 100k
+# tokens. Marking the static prefix + a rolling breakpoint on the conversation
+# lets every round after the first read that prefix from cache at ~10% of the cost.
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
 def _tool_spec(tool: Tool) -> dict[str, Any]:
     return {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+
+
+def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
+    """Put a single rolling cache breakpoint on the last message.
+
+    Everything before the breakpoint — system prompt, tools, and every prior
+    turn's fetched rows — is served from cache on the next round instead of being
+    re-billed. We clear any earlier message-level breakpoint first so the request
+    never exceeds Anthropic's 4-breakpoint limit (system + tools already use two).
+    Only dict/str content is touched; assistant turns hold SDK block objects and
+    are always followed by a user message, so the last message is never one of them.
+    """
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+    last = messages[-1]
+    content = last["content"]
+    if isinstance(content, str):
+        last["content"] = [
+            {"type": "text", "text": content, "cache_control": dict(_CACHE_CONTROL)}
+        ]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1]["cache_control"] = dict(_CACHE_CONTROL)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -96,7 +131,16 @@ class SnowflakeAgent:
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": question})
         tool_specs = [_tool_spec(t) for t in self._tools.values()]
+        # Cache the tool specs (they never change across rounds) by marking the last one.
+        cached_tool_specs = [dict(s) for s in tool_specs]
+        if cached_tool_specs:
+            cached_tool_specs[-1] = {**cached_tool_specs[-1], "cache_control": dict(_CACHE_CONTROL)}
+        # System prompt is identical every round — cache it too.
+        cached_system = [
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": dict(_CACHE_CONTROL)}
+        ]
         executed_sql: list[str] = []
+        usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
         # max_rounds query rounds + 1 final round where tools are withheld so the
         # model is forced to answer (guarantees termination).
@@ -108,16 +152,26 @@ class SnowflakeAgent:
             if not allow_tools:
                 messages.append({"role": "user", "content": _FINAL_ANSWER_INSTRUCTION})
 
+            # Roll the conversation cache breakpoint to the current last message so
+            # the whole prefix before it is a cache hit on this round.
+            _mark_cache_breakpoint(messages)
+
             kwargs: dict[str, Any] = {
                 "model": self._config.model,
                 "max_tokens": self._config.max_tokens,
-                "system": SYSTEM_PROMPT,
+                "system": cached_system,
                 "messages": messages,
             }
             if allow_tools:
-                kwargs["tools"] = tool_specs
+                kwargs["tools"] = cached_tool_specs
 
             response = self._client.messages.create(**kwargs)
+            u = getattr(response, "usage", None)
+            if u is not None:
+                usage["input"] += getattr(u, "input_tokens", 0) or 0
+                usage["output"] += getattr(u, "output_tokens", 0) or 0
+                usage["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
+                usage["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
             messages.append({"role": "assistant", "content": response.content})
 
             tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
@@ -163,7 +217,10 @@ class SnowflakeAgent:
                     values={},
                     executed_sql=executed_sql,
                 )
-                logger.info("agent returned non-JSON prose after %d queries", len(executed_sql))
+                logger.info(
+                    "agent returned non-JSON prose after %d queries; tokens=%s",
+                    len(executed_sql), usage,
+                )
                 return answer, messages
 
             chart = data.get("chart")
@@ -175,10 +232,11 @@ class SnowflakeAgent:
                 chart=chart if isinstance(chart, dict) else None,
             )
             logger.info(
-                "agent answered value=%r chart=%s after %d queries",
+                "agent answered value=%r chart=%s after %d queries; tokens=%s",
                 answer.value,
                 answer.chart.get("type") if answer.chart else None,
                 len(executed_sql),
+                usage,
             )
             return answer, messages
 
