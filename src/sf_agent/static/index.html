@@ -3,12 +3,19 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BayOne Snowflake Query Agent</title>
+<title>BayI Intelligence Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <style>
   :root {
     --bg: #faf8ff; --panel: #ffffff; --panel2: #f4f0fb; --border: #ddd0f2;
     --vborder: #c4aef0; --text: #1e1630; --muted: #6b6480; --accent: #7c3aed;
     --accent2: #d6249f; --danger: #e5484d; --code: #f6f3fb; --user: #efe4fc;
+    /* BayOne logo palette — the four donut segments, light pink -> deep purple. */
+    --bo-pink: #ec6ea9; --bo-magenta: #d6249f; --bo-deep: #c21e73; --bo-purple: #7a4e96;
+    /* Montserrat echoes the geometric BAYONE wordmark; system sans stays for body copy. */
+    --display: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -18,31 +25,46 @@
     font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   header {
-    display: flex; align-items: center; gap: 14px; padding: 12px 20px;
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
     border-bottom: 1px solid var(--border); background: var(--panel);
   }
-  header h1 { font-size: 16px; margin: 0; flex: 1; }
-  header .sub { color: var(--muted); font-size: 12px; font-weight: 400; }
+  header h1 {
+    font-family: var(--display); font-weight: 700; font-size: 16px; margin: 0; flex: 1;
+    letter-spacing: .01em; display: flex; align-items: baseline; gap: 7px;
+  }
+  /* Wordmark treatment: "BAYI" in the heavy geometric weight with the logo gradient. */
+  header h1 .wm {
+    font-family: var(--display); font-weight: 800; font-size: 18px;
+    letter-spacing: .02em; text-transform: uppercase;
+    background: linear-gradient(120deg, var(--bo-purple), var(--bo-deep) 55%, var(--bo-pink));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header .sub { color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: 0; }
+  /* Logo mark in the header sits between the wordmark, echoing the donut in BAYONE. */
+  .bo-mark { display: inline-block; vertical-align: middle; flex: none; }
   select, button {
     background: var(--panel2); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 8px 12px; font: inherit;
+    font-family: var(--display); font-weight: 600; font-size: 13px;
   }
   button { cursor: pointer; }
   button.primary {
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    color: #fff; border: 0; font-weight: 600;
+    background: linear-gradient(135deg, var(--bo-purple), var(--bo-magenta) 60%, var(--bo-pink));
+    color: #fff; border: 0; font-weight: 700;
   }
   button:disabled { opacity: .5; cursor: not-allowed; }
 
   main { flex: 1; overflow-y: auto; }
   .thread { max-width: 820px; margin: 0 auto; padding: 24px 20px 8px; }
   .empty { color: var(--muted); text-align: center; margin-top: 12vh; }
+  .empty > div:first-child { font-family: var(--display); font-weight: 600; color: var(--text); font-size: 15px; }
   .empty .chips { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
   .chip {
     background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
     border-radius: 999px; padding: 6px 13px; font-size: 13px; cursor: pointer;
+    font-family: var(--display); font-weight: 600;
   }
-  .chip:hover { color: var(--text); border-color: var(--accent); }
+  .chip:hover { color: var(--text); border-color: var(--accent2); }
 
   .msg { margin: 16px 0; display: flex; }
   .msg.user { justify-content: flex-end; }
@@ -53,10 +75,12 @@
   .badge {
     display: inline-block; background: rgba(214,36,159,.10); color: var(--accent2);
     border: 1px solid rgba(214,36,159,.35); border-radius: 8px; padding: 5px 11px;
-    font-weight: 700; font-size: 17px; margin-bottom: 10px;
+    font-family: var(--display); font-weight: 800; font-size: 17px; margin-bottom: 10px;
+    letter-spacing: .01em;
   }
   .answer { margin: 0; }
-  .klabel { color: var(--muted); font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+  .klabel { color: var(--muted); font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; font-family: var(--display); font-weight: 700; }
+  .vname { font-family: var(--display); }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   td { border-bottom: 1px solid var(--border); padding: 5px 4px; vertical-align: top; }
   td.k { color: var(--muted); }
@@ -75,7 +99,7 @@
   .vscalar { font-size: 14px; margin: 0; }
   .vempty { color: var(--muted); font-style: italic; opacity: .85; }
   details { margin-top: 10px; }
-  summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; font-family: var(--display); font-weight: 700; }
   .diag table { margin-top: 8px; font-size: 12.5px; }
   .diag td { padding: 5px 9px; }
   pre {
@@ -85,12 +109,18 @@
   .meta { color: var(--muted); font-size: 11px; margin-top: 8px; }
   .err .bubble { border-color: rgba(229,72,77,.5); }
   .err .answer { color: var(--danger); }
-  .spinner {
-    width: 15px; height: 15px; border: 2px solid rgba(124,58,237,.25);
-    border-top-color: var(--accent); border-radius: 50%; display: inline-block; vertical-align: -2px;
-    animation: spin .7s linear infinite; margin-right: 8px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Loading state: the BayOne donut mark spinning, no text (replaces the old
+     "Querying the warehouse…" line). The whole mark rotates while its segments
+     gently pulse, so it reads as the logo coming to life rather than a plain spinner. */
+  .bubble.loading { display: inline-flex; align-items: center; padding: 14px 16px; }
+  .bo-spin { transform-origin: 50% 50%; animation: bo-rotate 1.15s cubic-bezier(.66,.15,.34,.85) infinite; }
+  .bo-spin circle { animation: bo-pulse 1.15s ease-in-out infinite; }
+  .bo-spin circle:nth-child(2) { animation-delay: .10s; }
+  .bo-spin circle:nth-child(3) { animation-delay: .20s; }
+  .bo-spin circle:nth-child(4) { animation-delay: .30s; }
+  @keyframes bo-rotate { to { transform: rotate(360deg); } }
+  @keyframes bo-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 
   footer { border-top: 1px solid var(--border); background: var(--panel); }
   .composer { max-width: 820px; margin: 0 auto; padding: 14px 20px; display: flex; gap: 10px; align-items: flex-end; }
@@ -117,7 +147,8 @@
 </head>
 <body>
 <header>
-  <h1>BayI Intelligence Agent <span class="sub">— BayOne's Internal Intelligence</span></h1>
+  <span id="brandMark" title="BayOne"></span>
+  <h1><span class="wm">BayI</span> <span>Intelligence Agent</span> <span class="sub">— BayOne's Internal Intelligence</span></h1>
   <select id="tool" title="Query method"></select>
   <button id="pdfBtn" title="Download the whole conversation as a PDF">Download PDF</button>
   <button id="newChat">New chat</button>
@@ -139,6 +170,22 @@
 const $ = (s) => document.querySelector(s);
 const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), toolEl = $("#tool"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
 const mainEl = document.querySelector("main");
+
+// The BayOne mark: a four-segment donut (light pink -> magenta -> deep -> purple),
+// the same glyph that sits inside the BAYONE wordmark. Rendered as inline SVG so it
+// scales crisply and can be animated. `spin=true` gives the loading state. r=14 =>
+// circumference ~87.96; each segment is a quarter (21.99) minus a 2px gap for the
+// white dividers between colors.
+function boMark(size, spin) {
+  const seg = (color, off) =>
+    `<circle cx="20" cy="20" r="14" fill="none" stroke="${color}" stroke-width="8"`
+    + ` stroke-dasharray="19.99 67.97" stroke-dashoffset="${off}" transform="rotate(-90 20 20)"/>`;
+  return `<svg class="bo-mark${spin ? " bo-spin" : ""}" width="${size}" height="${size}"`
+    + ` viewBox="0 0 40 40" aria-hidden="true" focusable="false">`
+    + seg("var(--bo-pink)", 0) + seg("var(--bo-magenta)", -21.99)
+    + seg("var(--bo-deep)", -43.98) + seg("var(--bo-purple)", -65.97)
+    + `</svg>`;
+}
 
 const LS_SESSION = "sf_session_id", LS_MSGS = "sf_messages";
 let sessionId = localStorage.getItem(LS_SESSION) || null;
@@ -391,10 +438,10 @@ async function send() {
   qEl.value = ""; autosize();
   renderAll(); save();
 
-  // typing indicator
+  // Loading indicator: the spinning BayOne logo mark, no text.
   const typing = document.createElement("div");
   typing.className = "msg bot";
-  typing.innerHTML = `<div class="bubble"><span class="spinner"></span>Querying the warehouse…</div>`;
+  typing.innerHTML = `<div class="bubble loading">${boMark(30, true)}</div>`;
   threadEl.appendChild(typing); scrollDown();
 
   let data;
@@ -477,6 +524,7 @@ threadEl.addEventListener("click", (e) => {
   if (e.target.classList.contains("chip")) { qEl.value = e.target.textContent; autosize(); qEl.focus(); }
 });
 
+document.getElementById("brandMark").innerHTML = boMark(28, false);
 loadTools();
 renderAll();
 </script>
