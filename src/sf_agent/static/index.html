@@ -81,6 +81,30 @@
   .answer { margin: 0; }
   .klabel { color: var(--muted); font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; font-family: var(--display); font-weight: 700; }
   .vname { font-family: var(--display); }
+
+  /* Route pill: how the question was handled (database / follow-up / web), cited at the
+     top of every answer. A colored dot keys the route; the reason follows in muted text. */
+  .route {
+    display: inline-flex; align-items: center; gap: 7px; margin-bottom: 10px;
+    padding: 4px 11px; border-radius: 999px; font-family: var(--display);
+    font-size: 11.5px; font-weight: 700; border: 1px solid var(--border);
+    background: var(--panel2); max-width: 100%;
+  }
+  .route .rdot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .route .rlab { color: var(--text); text-transform: uppercase; letter-spacing: .05em; }
+  .route .rreason { color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+  .route-database { border-color: rgba(122,78,150,.4); background: rgba(122,78,150,.08); }
+  .route-database .rdot { background: var(--bo-purple); }
+  .route-followup { border-color: rgba(124,58,237,.35); background: rgba(124,58,237,.08); }
+  .route-followup .rdot { background: var(--accent); }
+  .route-web { border-color: rgba(214,36,159,.35); background: rgba(214,36,159,.08); }
+  .route-web .rdot { background: var(--bo-magenta); }
+
+  /* Web-answer source citations. */
+  .cites { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+  .cites li { margin: 3px 0; }
+  .cites a { color: var(--accent2); text-decoration: none; }
+  .cites a:hover { text-decoration: underline; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   td { border-bottom: 1px solid var(--border); padding: 5px 4px; vertical-align: top; }
   td.k { color: var(--muted); }
@@ -345,9 +369,42 @@ async function loadTools() {
   if (first) toolEl.value = first.id;
 }
 
+// Human-facing labels + one-line descriptions for each router verdict. The colored
+// dot (CSS, per .route-<route>) tells the three paths apart at a glance.
+const ROUTES = {
+  database: { label: "Database", desc: "Queried the Snowflake warehouse" },
+  followup: { label: "Follow-up", desc: "Answered from the previous turn's data" },
+  web: { label: "Web search", desc: "Searched the internet" },
+};
+
+// The transparency pill: shows which path answered this question, plus the router's
+// one-line reason. Rendered at the very top of every bot answer.
+function routePill(d) {
+  if (!d.route || !ROUTES[d.route]) return "";
+  const r = ROUTES[d.route];
+  const reason = d.route_reason ? ` — ${esc(d.route_reason)}` : "";
+  return `<div class="route route-${esc(d.route)}"><span class="rdot"></span>`
+    + `<span class="rlab">${esc(r.label)}</span><span class="rreason">${reason}</span></div>`;
+}
+
+// Source citations for the web route: a titled list of the pages the answer drew on.
+function citations(d) {
+  const c = d.citations || [];
+  if (!c.length) return "";
+  const items = c.map((x) => {
+    const label = esc(x.title || x.url || "source");
+    const url = x.url ? esc(x.url) : "";
+    return url
+      ? `<li><a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a></li>`
+      : `<li>${label}</li>`;
+  }).join("");
+  return `<div class="klabel">Sources (${c.length})</div><ul class="cites">${items}</ul>`;
+}
+
 function botInner(d) {
   let html = "";
   if (!d.ok) return `<p class="answer">${esc(d.error)}</p>`;
+  html += routePill(d);
   if (d.value !== null && d.value !== undefined && d.value !== "")
     html += `<div class="badge">${esc(d.value)}</div>`;
   html += `<p class="answer">${esc(d.answer)}</p>`;
@@ -362,6 +419,7 @@ function botInner(d) {
     for (const [k, v] of Object.entries(vals))
       html += `<div class="vsection"><div class="vname">${esc(humanize(k))}</div>${renderValue(v)}</div>`;
   }
+  html += citations(d);
   const sql = d.executed_sql || [];
   if (sql.length) {
     html += `<details><summary>Executed SQL (${sql.length})</summary>`;
@@ -384,6 +442,8 @@ function fmtCost(c) {
 // took, which tables it drew from, tokens used, and estimated cost.
 function diagnostics(d) {
   const rows = [];
+  if (d.route && ROUTES[d.route])
+    rows.push(["Route", ROUTES[d.route].label + (d.route_reason ? ` — ${d.route_reason}` : "")]);
   if (typeof d.elapsed_ms === "number")
     rows.push(["Time taken", (d.elapsed_ms / 1000).toFixed(1) + " s"]);
   const src = (d.sources && d.sources.length) ? d.sources.join(", ") : (d.tool || "agent");

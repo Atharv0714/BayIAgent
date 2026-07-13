@@ -73,20 +73,27 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(f"ANTHROPIC_API_KEY missing; agent cannot start ({e}).") from e
 
     # run_sql is always available once the connection is up.
-    STATE.agents["run_sql"] = SnowflakeAgent(
-        tools=[RunSqlTool(STATE.connection)], config=agent_config
-    )
+    run_sql_tool = RunSqlTool(STATE.connection)
+    STATE.agents["run_sql"] = SnowflakeAgent(tools=[run_sql_tool], config=agent_config)
 
     # cortex_analyst is optional — only if a PAT + semantic view are configured.
+    cortex_tool: CortexAnalystTool | None = None
     try:
         cortex_config = CortexConfig()  # type: ignore[call-arg]
-        STATE.agents["cortex_analyst"] = SnowflakeAgent(
-            tools=[CortexAnalystTool(STATE.connection, cortex_config)], config=agent_config
-        )
+        cortex_tool = CortexAnalystTool(STATE.connection, cortex_config)
+        STATE.agents["cortex_analyst"] = SnowflakeAgent(tools=[cortex_tool], config=agent_config)
         logger.info("web: cortex_analyst agent ready")
     except ValidationError:
         STATE.errors["cortex_analyst"] = "SNOWFLAKE_PAT / CORTEX_SEMANTIC_VIEW not configured"
         logger.info("web: cortex_analyst unavailable (no PAT / semantic view)")
+
+    # "auto" gives the agent both query tools so it can decide, per question, whether to
+    # use semantic search (Cortex Analyst) or write raw SQL. Falls back to just run_sql
+    # when Cortex isn't configured. (The database/followup/web route is chosen upstream
+    # by the router for every mode; auto only picks *which query tool* to run.)
+    auto_tools = [run_sql_tool] + ([cortex_tool] if cortex_tool is not None else [])
+    STATE.agents["auto"] = SnowflakeAgent(tools=auto_tools, config=agent_config)
+    logger.info("web: auto agent ready (%d query tools)", len(auto_tools))
 
     try:
         yield
@@ -115,10 +122,15 @@ def tools() -> dict[str, Any]:
     """Which tool paths this server can drive, so the UI can enable/disable them."""
     return {
         "tools": [
+            {
+                "id": "auto",
+                "label": "Auto — agent picks SQL or semantic search",
+                "available": "auto" in STATE.agents,
+            },
             {"id": "run_sql", "label": "run_sql (Claude writes SQL)", "available": "run_sql" in STATE.agents},
             {
                 "id": "cortex_analyst",
-                "label": "Cortex Analyst (semantic view)",
+                "label": "Cortex Analyst (semantic search)",
                 "available": "cortex_analyst" in STATE.agents,
                 "reason": STATE.errors.get("cortex_analyst"),
             },
@@ -146,7 +158,9 @@ def ask(req: AskRequest) -> JSONResponse:
     try:
         with _LOCK:
             history = STATE.conversations.get(session_id, [])
-            answer, updated = agent.converse(history, question)
+            # route_and_answer classifies (database / followup / web) first, then
+            # dispatches — so the answer carries the route + reason for transparency.
+            answer, updated = agent.route_and_answer(history, question)
             STATE.conversations[session_id] = updated
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
@@ -169,6 +183,9 @@ def ask(req: AskRequest) -> JSONResponse:
             "tokens": answer.tokens,
             "cost_usd": answer.cost_usd,
             "sources": answer.sources,
+            "route": answer.route,
+            "route_reason": answer.route_reason,
+            "citations": answer.citations,
         }
     )
 

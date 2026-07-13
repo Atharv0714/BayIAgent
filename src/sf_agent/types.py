@@ -70,3 +70,12 @@ class AgentAnswer(BaseModel):
     tokens: dict[str, int] = Field(default_factory=dict)  # input/output/cache_*/total
     cost_usd: float = 0.0  # estimated model cost for this answer
     sources: list[str] = Field(default_factory=list)  # data tables the SQL drew from
+
+    # Query routing, surfaced for transparency ("cite the route used"). The router
+    # classifies every question before it runs: "database" (query the warehouse),
+    # "followup" (answer from the previous turn's data), or "web" (search the internet).
+    route: str | None = None
+    route_reason: str | None = None
+    # External sources for a web-routed answer: [{"title": ..., "url": ...}], so the UI
+    # can cite where internet facts came from. None for database/followup answers.
+    citations: list[dict[str, Any]] | None = None

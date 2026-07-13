@@ -66,6 +66,9 @@ class AgentConfig(BaseSettings):
     model: str = Field(default="claude-sonnet-4-6", validation_alias="AGENT_MODEL")
     max_rounds: int = Field(default=8, gt=0, validation_alias="AGENT_MAX_ROUNDS")
     max_tokens: int = Field(default=8192, gt=0, validation_alias="AGENT_MAX_TOKENS")
+    # Cap on how many searches the web-route path may run per question (SDK web_search
+    # tool). Keeps a single internet answer bounded in latency and cost.
+    web_search_max_uses: int = Field(default=5, gt=0, validation_alias="WEB_SEARCH_MAX_USES")
 
 
 class CortexConfig(BaseSettings):

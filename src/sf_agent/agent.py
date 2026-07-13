@@ -5,11 +5,13 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import anthropic
 
 from sf_agent.config import AgentConfig
-from sf_agent.prompts import SYSTEM_PROMPT
+from sf_agent.prompts import FOLLOWUP_GUIDANCE, SYSTEM_PROMPT, WEB_SYSTEM
+from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_WEB, classify, usage_from
 from sf_agent.tools.base import Tool
 from sf_agent.types import AgentAnswer
 
@@ -98,6 +100,36 @@ def _extract_sources(sqls: list[str]) -> list[str]:
     return seen
 
 
+def _merge_usage(answer: AgentAnswer, extra: dict[str, int]) -> None:
+    """Fold an extra call's token usage (e.g. the router) into an answer's diagnostics,
+    then recompute the total and estimated cost so the panel stays honest."""
+    for k in ("input", "output", "cache_read", "cache_write"):
+        answer.tokens[k] = answer.tokens.get(k, 0) + extra.get(k, 0)
+    answer.tokens["total"] = sum(v for k, v in answer.tokens.items() if k != "total")
+    answer.cost_usd = _estimate_cost(answer.tokens)
+
+
+def _extract_web(content: list[Any]) -> tuple[str, list[dict[str, str]]]:
+    """Pull the answer text and de-duplicated source citations from a web-search reply.
+
+    Text blocks carry `.citations`; each web citation exposes a title + url. We keep the
+    first occurrence of each url so the UI can cite where the internet facts came from.
+    """
+    parts: list[str] = []
+    cites: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            continue
+        parts.append(block.text)
+        for c in getattr(block, "citations", None) or []:
+            url = getattr(c, "url", None)
+            if url and url not in seen:
+                seen.add(url)
+                cites.append({"title": (getattr(c, "title", None) or url), "url": url})
+    return "".join(parts).strip(), cites
+
+
 def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
     """Put a single rolling cache breakpoint on the last message.
 
@@ -176,7 +208,10 @@ class SnowflakeAgent:
         return answer
 
     def converse(
-        self, history: list[dict[str, Any]], question: str
+        self,
+        history: list[dict[str, Any]],
+        question: str,
+        guidance: str | None = None,
     ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
         """Answer `question` in the context of a prior message `history`.
 
@@ -186,10 +221,15 @@ class SnowflakeAgent:
         rows already fetched — in context, so a follow-up can analyze earlier output
         without re-querying. The message list holds the SDK's own content blocks, so
         keep it server-side rather than serializing it.
+
+        `guidance`, when set, is appended as an extra user turn before the loop runs —
+        the router uses it to nudge a follow-up toward answering from context.
         """
         start = time.perf_counter()
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": question})
+        if guidance:
+            messages.append({"role": "user", "content": guidance})
         tool_specs = [_tool_spec(t) for t in self._tools.values()]
         # Cache the tool specs (they never change across rounds) by marking the last one.
         cached_tool_specs = [dict(s) for s in tool_specs]
@@ -229,12 +269,8 @@ class SnowflakeAgent:
                 kwargs["tools"] = cached_tool_specs
 
             response = self._client.messages.create(**kwargs)
-            u = getattr(response, "usage", None)
-            if u is not None:
-                usage["input"] += getattr(u, "input_tokens", 0) or 0
-                usage["output"] += getattr(u, "output_tokens", 0) or 0
-                usage["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
-                usage["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+            for k, v in usage_from(response).items():
+                usage[k] += v
             messages.append({"role": "assistant", "content": response.content})
 
             tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
@@ -310,3 +346,109 @@ class SnowflakeAgent:
         raise AgentError(
             f"agent did not produce a final answer within {self._config.max_rounds} rounds"
         )
+
+    def route_and_answer(
+        self, history: list[dict[str, Any]], question: str
+    ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
+        """Classify the question, then answer it via the chosen route.
+
+        This is the entry point the web UI uses (the evals still call `converse`
+        directly, so their grounded-SQL behavior is unchanged). The route — database,
+        followup, or web — plus the router's one-line reason are recorded on the answer
+        so the UI can show how each question was handled, and the router's token cost is
+        folded into the answer's diagnostics.
+        """
+        decision, router_usage = classify(
+            self._client, self._config.model, question, bool(history)
+        )
+        if decision.route == ROUTE_WEB:
+            answer, updated = self._answer_web(history, question)
+        else:
+            guidance = FOLLOWUP_GUIDANCE if decision.route == ROUTE_FOLLOWUP else None
+            answer, updated = self.converse(history, question, guidance=guidance)
+
+        answer.route = decision.route
+        answer.route_reason = decision.reason
+        _merge_usage(answer, router_usage)
+        logger.info("routed q=%r -> %s (%s)", question, decision.route, decision.reason)
+        return answer, updated
+
+    def _answer_web(
+        self, history: list[dict[str, Any]], question: str
+    ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
+        """Answer from the open internet via the SDK's server-side web_search tool.
+
+        Unlike the database paths this returns cited prose (not the JSON contract); the
+        tool attaches source citations, which we surface so every internet fact is
+        traceable. History is persisted as plain text turns (not the raw server-tool
+        blocks), so a later database turn can replay the conversation without needing
+        the web tool re-declared.
+        """
+        start = time.perf_counter()
+        usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        messages: list[dict[str, Any]] = list(history)
+        messages.append({"role": "user", "content": question})
+        web_tool = [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": self._config.web_search_max_uses,
+            }
+        ]
+
+        final_content: list[Any] = []
+        try:
+            # The search can span several server turns; `pause_turn` means "keep going".
+            for _ in range(6):
+                response = self._client.messages.create(
+                    model=self._config.model,
+                    max_tokens=self._config.max_tokens,
+                    system=WEB_SYSTEM,
+                    messages=messages,
+                    tools=web_tool,
+                )
+                for k, v in usage_from(response).items():
+                    usage[k] += v
+                messages.append({"role": "assistant", "content": response.content})
+                final_content = response.content
+                if response.stop_reason != "pause_turn":
+                    break
+        except Exception as e:  # noqa: BLE001 — web search may be disabled on the account
+            answer = AgentAnswer(
+                answer=f"Internet search is unavailable right now ({e}).",
+                value=None,
+                executed_sql=[],
+            )
+            answer.elapsed_ms = (time.perf_counter() - start) * 1000
+            answer.tokens = {**usage, "total": sum(usage.values())}
+            answer.cost_usd = _estimate_cost(usage)
+            logger.warning("web route failed q=%r err=%s", question, e)
+            return answer, history  # don't persist a broken turn
+
+        text, citations = _extract_web(final_content)
+        domains: list[str] = []
+        for c in citations:
+            host = urlparse(c["url"]).netloc or c["url"]
+            if host not in domains:
+                domains.append(host)
+
+        answer = AgentAnswer(
+            answer=text or "The web search returned no usable answer.",
+            value=None,
+            values={},
+            executed_sql=[],
+            chart=None,
+            citations=citations or None,
+            sources=domains,
+        )
+        answer.elapsed_ms = (time.perf_counter() - start) * 1000
+        answer.tokens = {**usage, "total": sum(usage.values())}
+        answer.cost_usd = _estimate_cost(usage)
+
+        # Persist compact text turns so follow-ups keep context without the raw
+        # server-tool blocks (which can't be replayed to a call that lacks the tool).
+        updated = list(history)
+        updated.append({"role": "user", "content": question})
+        updated.append({"role": "assistant", "content": text or "(no answer)"})
+        logger.info("web answered chars=%d citations=%d", len(text), len(citations))
+        return answer, updated
