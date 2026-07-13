@@ -173,7 +173,6 @@
 <header>
   <span id="brandMark" title="BayOne"></span>
   <h1><span class="wm">BayI</span> <span>Intelligence Agent</span> <span class="sub">— BayOne's Internal Intelligence</span></h1>
-  <select id="tool" title="Query method"></select>
   <button id="pdfBtn" title="Download the whole conversation as a PDF">Download PDF</button>
   <button id="newChat">New chat</button>
 </header>
@@ -192,7 +191,10 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), toolEl = $("#tool"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
+const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
+// The agent always runs in Auto mode — it decides per question whether to use semantic
+// search (Cortex Analyst) or raw SQL — so there's no query-method picker in the UI.
+const TOOL = "auto";
 const mainEl = document.querySelector("main");
 
 // The BayOne mark: a four-segment donut (light pink -> magenta -> deep -> purple),
@@ -356,19 +358,6 @@ function save() {
 }
 function scrollDown() { mainEl.scrollTop = mainEl.scrollHeight; }
 
-async function loadTools() {
-  const data = await (await fetch("/api/tools")).json();
-  toolEl.innerHTML = "";
-  for (const t of data.tools) {
-    const opt = document.createElement("option");
-    opt.value = t.id; opt.textContent = t.label + (t.available ? "" : " — unavailable");
-    opt.disabled = !t.available;
-    toolEl.appendChild(opt);
-  }
-  const first = data.tools.find((t) => t.available);
-  if (first) toolEl.value = first.id;
-}
-
 // Human-facing labels + one-line descriptions for each router verdict. The colored
 // dot (CSS, per .route-<route>) tells the three paths apart at a glance.
 const ROUTES = {
@@ -508,7 +497,7 @@ async function send() {
   try {
     const r = await fetch("/api/ask", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, tool: toolEl.value, session_id: sessionId }),
+      body: JSON.stringify({ question, tool: TOOL, session_id: sessionId }),
     });
     data = await r.json();
     if (data.session_id) sessionId = data.session_id;
@@ -585,7 +574,6 @@ threadEl.addEventListener("click", (e) => {
 });
 
 document.getElementById("brandMark").innerHTML = boMark(28, false);
-loadTools();
 renderAll();
 </script>
 </body>
