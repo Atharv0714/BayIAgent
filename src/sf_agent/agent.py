@@ -13,7 +13,7 @@ from sf_agent.config import AgentConfig
 from sf_agent.prompts import FOLLOWUP_GUIDANCE, SYSTEM_PROMPT, WEB_SYSTEM
 from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_WEB, classify, usage_from
 from sf_agent.tools.base import Tool
-from sf_agent.types import AgentAnswer
+from sf_agent.types import AgentAnswer, ToolResult
 
 logger = logging.getLogger("sf_agent.agent")
 
@@ -70,6 +70,32 @@ def _is_discovery(sql: str) -> bool:
         return False
     m = _LIMIT_RE.search(sql)
     return bool(m) and int(m.group(1)) <= 5
+
+
+# A schema peek (`SELECT * ... LIMIT <=5`) exists only to reveal a table's columns so
+# the model can write the real query — the answer is never grounded in it. But it is the
+# widest-possible payload (all columns) and, like every tool result, is re-sent on every
+# later round of the loop. Keeping the columns plus a couple of sample rows preserves
+# everything the peek is actually used for (column names + example value shapes) while
+# dropping the redundant remainder, so this trims tokens without touching answer data.
+_DISCOVERY_SAMPLE_ROWS = 2
+
+
+def _compact_discovery_content(result: ToolResult) -> str:
+    r = result.result
+    if r is None:  # defensive: ok results always carry rows
+        return result.to_model_text()
+    kept = min(len(r.rows), _DISCOVERY_SAMPLE_ROWS)
+    return json.dumps(
+        {
+            "columns": r.columns,
+            "rows": r.rows[:_DISCOVERY_SAMPLE_ROWS],
+            "row_count": r.row_count,
+            "truncated": r.truncated,
+            "note": f"schema peek: {kept} of {len(r.rows)} sample rows shown",
+        },
+        default=str,
+    )
 
 
 def _tool_spec(tool: Tool) -> dict[str, Any]:
@@ -287,7 +313,12 @@ class SnowflakeAgent:
                             executed_sql.append(result.executed_sql)
                             if result.ok:
                                 source_sql.append(result.executed_sql)
-                        content = result.to_model_text()
+                        # A schema peek is only for column discovery; trim its sample so
+                        # the widest payload in the loop isn't re-sent in full each round.
+                        if result.ok and _is_discovery(result.executed_sql or ""):
+                            content = _compact_discovery_content(result)
+                        else:
+                            content = result.to_model_text()
                         is_error = not result.ok
                     tool_results.append(
                         {
