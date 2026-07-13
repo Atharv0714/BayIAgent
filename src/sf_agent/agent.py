@@ -387,7 +387,25 @@ class SnowflakeAgent:
         start = time.perf_counter()
         usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         messages: list[dict[str, Any]] = list(history)
-        messages.append({"role": "user", "content": question})
+        # Drop any cache markers carried in from a prior turn's history so we stay within
+        # Anthropic's 4-breakpoint limit, then anchor one breakpoint on this question. A
+        # single breakpoint caches the whole prefix before it (tools + system + history +
+        # question); each `pause_turn` round-trip only appends assistant turns after it, so
+        # the accumulated search results are re-read from cache instead of re-billed in full.
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        block.pop("cache_control", None)
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": question, "cache_control": dict(_CACHE_CONTROL)}
+                ],
+            }
+        )
         web_tool = [
             {
                 "type": "web_search_20250305",
