@@ -1,0 +1,250 @@
+"""Structuring step of the ingest page.
+
+One uploaded file -> one Claude call -> the fixed two-table JSON contract
+(`blocks` for retrieval, `facts` for analytics, plus a `manifest`) defined in
+`ingest_prompt.md`. This module only *structures and validates*; the write to
+Snowflake lives in `ingest_store.py` and runs only after the user confirms.
+
+Native multimodal input only (no parsing deps): PDFs and images go to Claude as
+`document` / `image` content blocks; text-family files as decoded text. Office
+formats are rejected with a convert-to-PDF message.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
+import time
+from pathlib import Path
+from typing import Any
+
+import anthropic
+from pydantic import BaseModel, Field
+
+from sf_agent.agent import _estimate_cost, _extract_json
+from sf_agent.config import AgentConfig
+from sf_agent.router import usage_from
+
+logger = logging.getLogger("sf_agent.ingest")
+
+# The structuring guide, loaded once and marked for prompt caching so it's billed
+# at the cache rate across uploads (mirrors the cached_system shape in agent.py).
+_GUIDE = (Path(__file__).parent / "ingest_prompt.md").read_text("utf-8")
+INGEST_SYSTEM = [{"type": "text", "text": _GUIDE, "cache_control": {"type": "ephemeral"}}]
+
+# Extension -> how the bytes reach Claude. PDFs/images use native content blocks;
+# text-family files are decoded inline. Office formats are intentionally absent so
+# they hit the convert-to-PDF rejection below.
+_PDF_EXTS = {".pdf"}
+_IMAGE_MEDIA = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+_TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".html", ".htm", ".json", ".eml"}
+
+# Closed vocabularies from the guide — the app rejects any value outside these.
+_CONTENT_TYPES = {
+    "title",
+    "narrative",
+    "bullet_list",
+    "statistic",
+    "table",
+    "image_text",
+    "section_divider",
+}
+_BLOCK_STATUSES = {"filled", "partial", "placeholder"}
+_UNITS = {"usd", "usd_per_hour", "pct", "count", "score", "ratio", "date", "unknown"}
+
+# Block fields that must be present and non-null (guide validation gates).
+_REQUIRED_BLOCK_FIELDS = (
+    "block_index",
+    "section_number",
+    "section_title",
+    "section_theme",
+    "block_order",
+    "content_type",
+    "block_status",
+    "text_content",
+)
+
+
+class IngestError(RuntimeError):
+    """Raised for an unsupported file type or an unusable model response."""
+
+
+class StructuredResult(BaseModel):
+    """The validated preview handed to the UI and (on confirm) to the loader."""
+
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    blocks: list[dict[str, Any]] = Field(default_factory=list)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    # Soft issues worth showing but not blocking the commit.
+    warnings: list[str] = Field(default_factory=list)
+    # Hard gate failures — a non-empty list disables the confirm button.
+    errors: list[str] = Field(default_factory=list)
+    # Diagnostics for the one structuring call: wall time, token usage, and estimated
+    # cost — shown at the bottom of the preview (and kept with the draft).
+    elapsed_ms: float = 0.0
+    tokens: dict[str, int] = Field(default_factory=dict)
+    cost_usd: float = 0.0
+
+    @property
+    def committable(self) -> bool:
+        return not self.errors and bool(self.manifest.get("coverage_ok"))
+
+
+def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
+    """Turn one uploaded file into Anthropic content blocks for the structuring call.
+
+    Raises IngestError for Office/unknown types so the caller can return a clean 415.
+    """
+    ext = Path(filename).suffix.lower()
+    instruction = {
+        "type": "text",
+        "text": (
+            f'Structure this per the contract. source_file="{filename}". Return JSON only.'
+        ),
+    }
+
+    if ext in _PDF_EXTS:
+        source_block: dict[str, Any] = {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(raw).decode("ascii"),
+            },
+        }
+    elif ext in _IMAGE_MEDIA:
+        source_block = {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": _IMAGE_MEDIA[ext],
+                "data": base64.b64encode(raw).decode("ascii"),
+            },
+        }
+    elif ext in _TEXT_EXTS:
+        text = raw.decode("utf-8", errors="replace")
+        source_block = {"type": "text", "text": f"Filename: {filename}\n\n{text}"}
+    else:
+        raise IngestError(
+            f"Unsupported file type '{ext or filename}' — convert to PDF and retry."
+        )
+
+    return [source_block, instruction]
+
+
+def validate(data: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Check a structured payload against the guide's gates.
+
+    Returns (warnings, errors). Errors are hard failures that must block the commit;
+    warnings are surfaced but non-blocking.
+    """
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    manifest = data.get("manifest")
+    if not isinstance(manifest, dict):
+        errors.append("manifest is missing or not an object.")
+        manifest = {}
+    elif not manifest.get("coverage_ok"):
+        errors.append("manifest.coverage_ok is not true — coverage incomplete, rejected.")
+
+    blocks = data.get("blocks")
+    if not isinstance(blocks, list):
+        errors.append("blocks is missing or not a list.")
+        blocks = []
+    facts = data.get("facts")
+    if not isinstance(facts, list):
+        errors.append("facts is missing or not a list.")
+        facts = []
+
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            errors.append(f"block[{i}] is not an object.")
+            continue
+        for field in _REQUIRED_BLOCK_FIELDS:
+            if block.get(field) is None:
+                errors.append(f"block[{i}] missing required field '{field}'.")
+        ct = block.get("content_type")
+        if ct is not None and ct not in _CONTENT_TYPES:
+            errors.append(f"block[{i}] content_type '{ct}' not in the closed set.")
+        bs = block.get("block_status")
+        if bs is not None and bs not in _BLOCK_STATUSES:
+            errors.append(f"block[{i}] block_status '{bs}' not in the closed set.")
+
+    for i, fact in enumerate(facts):
+        if not isinstance(fact, dict):
+            errors.append(f"fact[{i}] is not an object.")
+            continue
+        vn = fact.get("value_num")
+        if not (vn is None or isinstance(vn, (int, float)) and not isinstance(vn, bool)):
+            errors.append(f"fact[{i}] value_num must be a number or null, got {vn!r}.")
+        unit = fact.get("unit")
+        if unit not in _UNITS:
+            errors.append(f"fact[{i}] unit '{unit}' not in the closed set.")
+        raw_value = fact.get("raw_value")
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            errors.append(f"fact[{i}] raw_value must be non-empty.")
+
+    # Carry the model's own manifest warnings through to the UI.
+    for w in manifest.get("warnings", []) or []:
+        warnings.append(str(w))
+
+    return warnings, errors
+
+
+def structure_upload(
+    client: anthropic.Anthropic, config: AgentConfig, filename: str, raw: bytes
+) -> StructuredResult:
+    """One-shot structuring call: file bytes -> validated StructuredResult.
+
+    Raises IngestError for unsupported types or when the model output can't be used
+    (max_tokens truncation, non-JSON). Validation failures do NOT raise — they come
+    back inside the result's `errors` so the UI can show the preview and block commit.
+    """
+    content = build_content_block(filename, raw)
+    # Streaming: a large document can emit tens of thousands of output tokens, and the
+    # SDK refuses a non-streaming call whose max_tokens could exceed the 10-minute cap.
+    start = time.perf_counter()
+    with client.messages.stream(
+        model=config.model,
+        max_tokens=config.ingest_max_tokens,
+        system=INGEST_SYSTEM,
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        resp = stream.get_final_message()
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    # Meter the call the same way the agent loop does, so ingest cost is comparable.
+    usage = usage_from(resp)
+    cost_usd = _estimate_cost(usage)
+    tokens = {**usage, "total": sum(usage.values())}
+
+    if resp.stop_reason == "max_tokens":
+        raise IngestError(
+            "The document was too large to structure in one pass (output truncated). "
+            "Split it into smaller files and retry."
+        )
+
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    try:
+        data = _extract_json(text)
+    except Exception as e:  # noqa: BLE001 — surface any parse failure as an ingest error
+        raise IngestError(f"Model did not return usable JSON: {e}") from e
+
+    warnings, errors = validate(data)
+    return StructuredResult(
+        manifest=data.get("manifest") or {},
+        blocks=data.get("blocks") or [],
+        facts=data.get("facts") or [],
+        warnings=warnings,
+        errors=errors,
+        elapsed_ms=elapsed_ms,
+        tokens=tokens,
+        cost_usd=cost_usd,
+    )

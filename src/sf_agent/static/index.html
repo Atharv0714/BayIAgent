@@ -54,6 +54,34 @@
   }
   button:disabled { opacity: .5; cursor: not-allowed; }
 
+  /* Layout: a persistent saved-chats sidebar to the left of the conversation. */
+  .layout { flex: 1; display: flex; min-height: 0; }
+  .content { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .sidebar {
+    width: 252px; flex: none; border-right: 1px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; padding: 12px; gap: 10px; overflow-y: auto;
+  }
+  .sidebtn { width: 100%; }
+  .sidebar h2 {
+    font-family: var(--display); font-weight: 700; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin: 4px 6px 0;
+  }
+  .chatlist { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; }
+  .chat-item {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px;
+    cursor: pointer; color: var(--text); font-size: 13px; border: 1px solid transparent;
+  }
+  .chat-item:hover { background: var(--panel2); }
+  .chat-item.active { background: var(--panel2); border-color: var(--vborder); }
+  .chat-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-del {
+    flex: none; border: 0; background: transparent; color: var(--muted); font-size: 16px;
+    padding: 0 5px; line-height: 1; opacity: 0; border-radius: 6px; font-family: inherit;
+  }
+  .chat-item:hover .chat-del, .chat-item.active .chat-del { opacity: 1; }
+  .chat-del:hover { color: var(--danger); background: rgba(229,72,77,.1); }
+  .chat-empty { color: var(--muted); font-size: 12px; padding: 8px 10px; }
+
   main { flex: 1; overflow-y: auto; }
   .thread { max-width: 820px; margin: 0 auto; padding: 24px 20px 8px; }
   .empty { color: var(--muted); text-align: center; margin-top: 12vh; }
@@ -173,21 +201,31 @@
 <header>
   <span id="brandMark" title="BayOne"></span>
   <h1><span class="wm">BayI</span> <span>Intelligence Agent</span> <span class="sub">— BayOne's Internal Intelligence</span></h1>
+  <a href="/ingest" style="text-decoration:none"><button id="ingestBtn" title="Structure a file and load it into the knowledge base">Ingest</button></a>
   <button id="pdfBtn" title="Download the whole conversation as a PDF">Download PDF</button>
   <button id="newChat">New chat</button>
 </header>
 
-<main>
-  <div class="thread" id="thread"></div>
-</main>
+<div class="layout">
+  <aside class="sidebar">
+    <button class="primary sidebtn" id="newChatSide">+ New chat</button>
+    <h2>Saved chats</h2>
+    <div class="chatlist" id="chatList"></div>
+  </aside>
+  <div class="content">
+    <main>
+      <div class="thread" id="thread"></div>
+    </main>
 
-<footer>
-  <div class="composer">
-    <textarea id="q" rows="1" placeholder="Ask a question — then follow up to analyze the result…"></textarea>
-    <button class="primary" id="send">Send</button>
+    <footer>
+      <div class="composer">
+        <textarea id="q" rows="1" placeholder="Ask a question — then follow up to analyze the result…"></textarea>
+        <button class="primary" id="send">Send</button>
+      </div>
+      <div class="hint">Enter to send · Shift+Enter for newline · follow-ups keep the previous answer in context</div>
+    </footer>
   </div>
-  <div class="hint">Enter to send · Shift+Enter for newline · follow-ups keep the previous answer in context</div>
-</footer>
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -213,10 +251,22 @@ function boMark(size, spin) {
     + `</svg>`;
 }
 
-const LS_SESSION = "sf_session_id", LS_MSGS = "sf_messages";
+const LS_SESSION = "sf_session_id", LS_MSGS = "sf_messages", LS_CHATS = "sf_chats";
 let sessionId = localStorage.getItem(LS_SESSION) || null;
 let messages = JSON.parse(localStorage.getItem(LS_MSGS) || "[]"); // [{role, ...}]
+// Saved chats live entirely in this browser's localStorage — one entry per conversation,
+// [{id, title, messages, updated}]. `id` doubles as the server session_id. They are
+// per-browser and hold the rendered transcript only; the raw rows that power follow-ups
+// live in server memory and aren't restored across restarts (a reopened chat re-queries).
+let chats = JSON.parse(localStorage.getItem(LS_CHATS) || "[]");
 let busy = false;
+
+function newId() {
+  const raw = (crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : Date.now().toString(36) + Math.random().toString(36).slice(2);
+  return raw.replace(/-/g, "");
+}
 
 // Chart rendering state. botInner emits a <canvas> and queues its spec; charts are
 // instantiated after the message is in the DOM (Chart.js needs a mounted canvas).
@@ -352,9 +402,72 @@ function flushCharts() {
   }
 }
 
-function save() {
+// Persist the *active* conversation (the one on screen) for reload continuity.
+function persistActive() {
   if (sessionId) localStorage.setItem(LS_SESSION, sessionId); else localStorage.removeItem(LS_SESSION);
   localStorage.setItem(LS_MSGS, JSON.stringify(messages));
+}
+function persistChats() { localStorage.setItem(LS_CHATS, JSON.stringify(chats)); }
+
+// A chat's sidebar label: its first user question, trimmed.
+function chatTitle(msgs) {
+  const first = msgs.find((m) => m.role === "user");
+  const t = ((first && first.text) || "New chat").trim();
+  return t.length > 60 ? t.slice(0, 57) + "…" : t;
+}
+
+// Fold the active conversation into the saved-chats list (skip empty ones).
+function upsertChat() {
+  if (!sessionId || !messages.length) return;
+  const entry = { id: sessionId, title: chatTitle(messages), messages, updated: Date.now() };
+  const idx = chats.findIndex((c) => c.id === sessionId);
+  if (idx >= 0) chats[idx] = entry; else chats.push(entry);
+}
+
+// Called after each turn changes the active chat: persist everything + redraw the list.
+function save() {
+  persistActive();
+  upsertChat();
+  persistChats();
+  renderChats();
+}
+
+function renderChats() {
+  const list = $("#chatList");
+  if (!list) return;
+  const sorted = chats.slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  if (!sorted.length) { list.innerHTML = `<div class="chat-empty">No saved chats yet</div>`; return; }
+  list.innerHTML = sorted.map((c) =>
+    `<div class="chat-item${c.id === sessionId ? " active" : ""}" data-id="${esc(c.id)}">`
+    + `<span class="chat-title">${esc(c.title)}</span>`
+    + `<button class="chat-del" data-del="${esc(c.id)}" title="Delete chat">×</button>`
+    + `</div>`
+  ).join("");
+}
+
+function loadChat(id) {
+  if (busy || id === sessionId) return;
+  const c = chats.find((x) => x.id === id);
+  if (!c) return;
+  sessionId = c.id;
+  messages = JSON.parse(JSON.stringify(c.messages)); // clone so edits don't alias the store
+  persistActive();
+  renderAll();
+  renderChats();
+}
+
+function deleteChat(id) {
+  chats = chats.filter((c) => c.id !== id);
+  persistChats();
+  // Best-effort: free the chat's server-side memory too.
+  try {
+    fetch("/api/reset", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: "", session_id: id }),
+    });
+  } catch {}
+  if (id === sessionId) { sessionId = null; messages = []; persistActive(); renderAll(); }
+  renderChats();
 }
 function scrollDown() { mainEl.scrollTop = mainEl.scrollHeight; }
 
@@ -483,6 +596,9 @@ async function send() {
   const question = qEl.value.trim();
   if (!question || busy) return;
   busy = true; sendBtn.disabled = true;
+  // Give the chat a stable id up front so it can be saved before the server replies.
+  // We pass it as session_id; the backend adopts a client-supplied id as-is.
+  if (!sessionId) sessionId = newId();
   messages.push({ role: "user", text: question });
   qEl.value = ""; autosize();
   renderAll(); save();
@@ -555,17 +671,26 @@ async function downloadPdf() {
   }
 }
 
-async function newChat() {
-  if (sessionId) {
-    try { await fetch("/api/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: "", session_id: sessionId }) }); } catch {}
-  }
-  sessionId = null; messages = []; save(); renderAll(); qEl.focus();
+function newChat() {
+  if (busy) return;
+  // The current chat is already saved in the sidebar (save() runs after every turn),
+  // so New chat just starts a fresh conversation — it no longer wipes server memory,
+  // leaving the prior chat's context intact for when it's reopened this session.
+  sessionId = null; messages = [];
+  persistActive(); renderAll(); renderChats(); qEl.focus();
 }
 
 function autosize() { qEl.style.height = "auto"; qEl.style.height = Math.min(qEl.scrollHeight, 180) + "px"; }
 
 sendBtn.addEventListener("click", send);
 newChatBtn.addEventListener("click", newChat);
+$("#newChatSide").addEventListener("click", newChat);
+$("#chatList").addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) { deleteChat(del.getAttribute("data-del")); return; }
+  const item = e.target.closest(".chat-item");
+  if (item) loadChat(item.getAttribute("data-id"));
+});
 pdfBtn.addEventListener("click", downloadPdf);
 qEl.addEventListener("input", autosize);
 qEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
@@ -575,6 +700,7 @@ threadEl.addEventListener("click", (e) => {
 
 document.getElementById("brandMark").innerHTML = boMark(28, false);
 renderAll();
+renderChats();
 </script>
 </body>
 </html>

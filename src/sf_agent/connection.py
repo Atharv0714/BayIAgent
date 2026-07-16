@@ -103,6 +103,39 @@ class SnowflakeConnection:
             self.connect()
             return self._run(sql, cap)
 
+    def execute_ddl(self, sql: str) -> None:
+        """Run a statement that returns no rows (e.g. CREATE TABLE) and commit.
+
+        Deliberately separate from `execute`, which assumes a result set. Used only
+        by the ingest write path — never by the read agent.
+        """
+        if self._conn is None:
+            raise RuntimeError("connection is not open; call connect() or use as context manager")
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql)
+            self._conn.commit()
+        finally:
+            cur.close()
+
+    def executemany(self, sql: str, rows: list[tuple[object, ...]]) -> int:
+        """Bulk-insert `rows` via a parametrized statement and commit; return the count.
+
+        The SQL is app-authored with bound value placeholders (never model text), so
+        it bypasses the read-only guard by design. A no-op when `rows` is empty.
+        """
+        if self._conn is None:
+            raise RuntimeError("connection is not open; call connect() or use as context manager")
+        if not rows:
+            return 0
+        cur = self._conn.cursor()
+        try:
+            cur.executemany(sql, rows)
+            self._conn.commit()
+            return len(rows)
+        finally:
+            cur.close()
+
     def _run(self, sql: str, cap: int) -> QueryResult:
         assert self._conn is not None
         cur = self._conn.cursor()

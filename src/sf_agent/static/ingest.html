@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ingest — BayI Intelligence Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #faf8ff; --panel: #ffffff; --panel2: #f4f0fb; --border: #ddd0f2;
+    --vborder: #c4aef0; --text: #1e1630; --muted: #6b6480; --accent: #7c3aed;
+    --accent2: #d6249f; --danger: #e5484d; --ok: #1a7f52; --code: #f6f3fb;
+    --bo-pink: #ec6ea9; --bo-magenta: #d6249f; --bo-deep: #c21e73; --bo-purple: #7a4e96;
+    --display: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); height: 100vh;
+    display: flex; flex-direction: column;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 {
+    font-family: var(--display); font-weight: 700; font-size: 16px; margin: 0; flex: 1;
+    letter-spacing: .01em; display: flex; align-items: baseline; gap: 7px;
+  }
+  header h1 .wm {
+    font-family: var(--display); font-weight: 800; font-size: 18px;
+    letter-spacing: .02em; text-transform: uppercase;
+    background: linear-gradient(120deg, var(--bo-purple), var(--bo-deep) 55%, var(--bo-pink));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header .sub { color: var(--muted); font-size: 12px; font-weight: 400; }
+  a.back {
+    font-family: var(--display); font-weight: 600; font-size: 13px; color: var(--accent);
+    text-decoration: none; padding: 8px 12px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--panel2);
+  }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 14px; font: inherit;
+    font-family: var(--display); font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  button.primary {
+    background: linear-gradient(135deg, var(--bo-purple), var(--bo-magenta) 60%, var(--bo-pink));
+    color: #fff; border: 0; font-weight: 700;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Layout: a persistent saved ingest-history sidebar to the left of the workspace. */
+  .layout { flex: 1; display: flex; min-height: 0; }
+  .content { flex: 1; overflow-y: auto; min-width: 0; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+  .sidebar {
+    width: 264px; flex: none; border-right: 1px solid var(--border); background: var(--panel);
+    display: flex; flex-direction: column; padding: 12px; gap: 10px; overflow-y: auto;
+  }
+  .sidebar h2 {
+    font-family: var(--display); font-weight: 700; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin: 4px 6px 0;
+  }
+  .histlist { display: flex; flex-direction: column; gap: 4px; }
+  .hist-empty { color: var(--muted); font-size: 12px; padding: 8px 10px; }
+  .hist-item {
+    display: flex; align-items: flex-start; gap: 6px; padding: 9px 10px; border-radius: 9px;
+    cursor: pointer; color: var(--text); border: 1px solid transparent; background: var(--panel2);
+  }
+  .hist-item:hover { border-color: var(--border); }
+  .hist-item.active { border-color: var(--vborder); background: #fff; }
+  .hist-main { flex: 1; min-width: 0; }
+  .hist-name {
+    font-family: var(--display); font-weight: 600; font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .hist-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .hist-badges { display: flex; gap: 6px; align-items: center; margin-top: 5px; flex-wrap: wrap; }
+  .pill {
+    font-family: var(--display); font-weight: 700; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .04em; border-radius: 6px; padding: 2px 7px;
+  }
+  .pill.draft { background: #fef6e7; color: #8a6100; border: 1px solid #f0dca6; }
+  .pill.committed { background: #e7f6ee; color: var(--ok); border: 1px solid #bfe6d1; }
+  .pill.issue { background: #fdecec; color: var(--danger); border: 1px solid #f4c7c7; }
+  .hist-del {
+    flex: none; border: 0; background: transparent; color: var(--muted); font-size: 16px;
+    padding: 0 4px; line-height: 1; opacity: 0; border-radius: 6px; font-family: inherit; cursor: pointer;
+  }
+  .hist-item:hover .hist-del, .hist-item.active .hist-del { opacity: 1; }
+  .hist-del:hover { color: var(--danger); background: rgba(229,72,77,.1); }
+
+  .drop {
+    border: 2px dashed var(--vborder); border-radius: 14px; background: var(--panel);
+    padding: 40px 20px; text-align: center; color: var(--muted); cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .drop.hover { background: var(--panel2); border-color: var(--accent); color: var(--text); }
+  .drop strong { color: var(--text); font-family: var(--display); }
+  .drop .types { font-size: 12px; margin-top: 8px; }
+
+  .banner { border-radius: 10px; padding: 12px 14px; margin: 16px 0; font-size: 14px; display: none; }
+  .banner.show { display: block; }
+  .banner.err { background: #fdecec; color: var(--danger); border: 1px solid #f4c7c7; }
+  .banner.ok { background: #e7f6ee; color: var(--ok); border: 1px solid #bfe6d1; }
+  .banner.warn { background: #fef6e7; color: #8a6100; border: 1px solid #f0dca6; }
+
+  section.card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; margin: 16px 0;
+  }
+  section.card h2 {
+    font-family: var(--display); font-size: 14px; margin: 0 0 12px; color: var(--accent);
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: 13px; }
+  .kv dt { color: var(--muted); font-weight: 600; }
+  .kv dd { margin: 0; word-break: break-word; }
+  ul.plain { margin: 0; padding-left: 18px; font-size: 13px; }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td {
+    border: 1px solid var(--border); padding: 5px 8px; text-align: left;
+    vertical-align: top; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  th { background: var(--panel2); font-family: var(--display); position: sticky; top: 0; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .spin { display: none; margin: 18px 0; color: var(--muted); }
+  .spin.show { display: block; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+
+  .diag {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+    padding: 4px 14px; margin-top: 16px; font-size: 13px;
+  }
+  .diag summary {
+    font-family: var(--display); font-weight: 600; color: var(--accent);
+    cursor: pointer; padding: 8px 0; list-style: none;
+  }
+  .diag summary::-webkit-details-marker { display: none; }
+  .diag table { width: auto; border-collapse: collapse; margin: 4px 0 10px; }
+  .diag td { border: 0; padding: 4px 16px 4px 0; font-size: 12.5px; white-space: nowrap; }
+  .diag td.k { color: var(--muted); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="wm">BayI</span> <span>Ingest</span> <span class="sub">— structure a file into the knowledge base</span></h1>
+  <a class="back" href="/">← Back to chat</a>
+</header>
+
+<div class="layout">
+<aside class="sidebar">
+  <h2>Ingest history</h2>
+  <div class="histlist" id="histList"></div>
+</aside>
+<div class="content">
+<main>
+  <div id="drop" class="drop">
+    <strong>Drop a file here</strong> or click to choose
+    <div class="types">PDF · PNG/JPG · TXT · MD · CSV · HTML · JSON · EML &nbsp;·&nbsp; Office files: convert to PDF first</div>
+    <input id="file" type="file" hidden />
+  </div>
+
+  <div id="spin" class="spin">Structuring <strong id="spinName"></strong> with Claude… this can take a moment.</div>
+  <div id="banner" class="banner"></div>
+
+  <div id="preview" style="display:none">
+    <section class="card">
+      <h2>Manifest</h2>
+      <dl class="kv" id="manifestKv"></dl>
+      <div id="droppedWrap" style="margin-top:12px; display:none">
+        <div class="muted" style="margin-bottom:4px">Dropped units</div>
+        <ul class="plain" id="droppedList"></ul>
+      </div>
+    </section>
+
+    <section class="card" id="warnCard" style="display:none">
+      <h2>Warnings</h2>
+      <ul class="plain" id="warnList"></ul>
+    </section>
+
+    <section class="card" id="errCard" style="display:none">
+      <h2>Validation errors — commit blocked</h2>
+      <ul class="plain" id="errList"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Blocks (<span id="blockCount">0</span>)</h2>
+      <div class="tablewrap"><table id="blocksTable"></table></div>
+    </section>
+
+    <section class="card">
+      <h2>Facts (<span id="factCount">0</span>)</h2>
+      <div class="tablewrap"><table id="factsTable"></table></div>
+    </section>
+
+    <div class="actions">
+      <button id="confirmBtn" class="primary">Confirm &amp; ingest</button>
+      <button id="resetBtn">Discard</button>
+      <span class="muted" id="commitNote"></span>
+    </div>
+
+    <details id="diag" class="diag" style="display:none"></details>
+  </div>
+</main>
+</div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+// Column order must match ingest_store.BLOCK_COLS / FACT_COLS (minus ingest_id).
+const BLOCK_COLS = ["block_index","section_number","section_title","section_theme","block_order",
+  "content_type","block_status","image_class","text_content","table_html","table_markdown",
+  "image_ocr_text","owner","source_parser","source_file","source_modified_at","extracted_at"];
+const FACT_COLS = ["fact_id","source_file","source_locator","entity_type","entity_name","attribute",
+  "period","value_num","unit","value_text","raw_value","confidence","notes"];
+
+const dropEl = $("#drop"), fileEl = $("#file"), spinEl = $("#spin"), bannerEl = $("#banner");
+const previewEl = $("#preview"), confirmBtn = $("#confirmBtn"), resetBtn = $("#resetBtn");
+const histList = $("#histList");
+let currentId = null;
+
+function fmtWhen(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString();
+}
+function escText(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function fmtCost(c) {
+  if (c == null) return null;
+  if (c === 0) return "$0.00";
+  if (c < 0.0001) return "<$0.0001";
+  return "$" + c.toFixed(c < 0.01 ? 4 : 2);
+}
+
+// Diagnostics panel at the bottom of the preview: time, tokens, and estimated cost
+// for the one structuring call (metered like the chat agent's answers).
+function renderDiag(data) {
+  const diagEl = $("#diag");
+  const rows = [];
+  if (typeof data.elapsed_ms === "number" && data.elapsed_ms > 0)
+    rows.push(["Time taken", (data.elapsed_ms / 1000).toFixed(1) + " s"]);
+  const tk = data.tokens || {};
+  if (tk.total)
+    rows.push(["Tokens used", `${tk.total.toLocaleString()} total — ${(tk.input || 0).toLocaleString()} in, `
+      + `${(tk.output || 0).toLocaleString()} out, ${((tk.cache_read || 0) + (tk.cache_write || 0)).toLocaleString()} cache`]);
+  const cost = fmtCost(data.cost_usd);
+  if (cost) rows.push(["Structuring cost", cost]);
+  if (!rows.length) { diagEl.style.display = "none"; return; }
+  const body = rows.map(([k, v]) => `<tr><td class="k">${escText(k)}</td><td>${escText(v)}</td></tr>`).join("");
+  diagEl.innerHTML = `<summary>Diagnostics · structuring via Claude</summary><table><tbody>${body}</tbody></table>`;
+  diagEl.style.display = "block";
+}
+
+function banner(kind, msg) {
+  bannerEl.className = "banner show " + kind;
+  bannerEl.textContent = msg;
+}
+function hideBanner() { bannerEl.className = "banner"; }
+
+function cell(v) {
+  if (v === null || v === undefined) return '<td class="muted">null</td>';
+  const s = String(v);
+  const esc = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<td title="${esc}">${esc}</td>`;
+}
+function renderTable(el, cols, rows) {
+  const head = "<tr>" + cols.map((c) => `<th>${c}</th>`).join("") + "</tr>";
+  if (!rows.length) {
+    el.innerHTML = head + `<tr><td class="muted" colspan="${cols.length}">no rows</td></tr>`;
+    return;
+  }
+  const body = rows.map((r) => "<tr>" + cols.map((c) => cell(r[c])).join("") + "</tr>").join("");
+  el.innerHTML = head + body;
+}
+
+function renderManifest(m) {
+  const kv = $("#manifestKv");
+  const keys = ["source_file","source_type","doc_type","extracted_at","source_modified_at",
+    "block_count","fact_count","coverage_ok"];
+  kv.innerHTML = keys.map((k) => `<dt>${k}</dt><dd>${m[k] === undefined || m[k] === null ? '—' : m[k]}</dd>`).join("");
+  const dropped = Array.isArray(m.dropped) ? m.dropped : [];
+  const dw = $("#droppedWrap");
+  if (dropped.length) {
+    dw.style.display = "block";
+    $("#droppedList").innerHTML = dropped.map((d) => `<li>${d.unit ?? '?'} — <span class="muted">${d.reason ?? ''}</span></li>`).join("");
+  } else { dw.style.display = "none"; }
+}
+
+function renderList(cardEl, listEl, items) {
+  if (items && items.length) {
+    cardEl.style.display = "block";
+    listEl.innerHTML = items.map((x) => `<li>${String(x).replace(/</g, "&lt;")}</li>`).join("");
+  } else { cardEl.style.display = "none"; }
+}
+
+// The saved ingest-history sidebar: every structured upload, drafts and committed
+// alike, newest first. A draft can be resumed and committed; a committed record is
+// read-only history. Both are viewable and deletable.
+async function loadHistory() {
+  try {
+    const res = await fetch("/api/ingest/drafts");
+    const data = await res.json();
+    const rows = (data.ok && data.drafts) || [];
+    if (!rows.length) {
+      histList.innerHTML = `<div class="hist-empty">No ingests yet. Drop a file to start.</div>`;
+      return;
+    }
+    histList.innerHTML = rows.map((d) => {
+      const active = d.ingest_id === currentId ? " active" : "";
+      const statusPill = d.status === "committed"
+        ? `<span class="pill committed">Ingested</span>`
+        : `<span class="pill draft">Draft</span>`;
+      const issuePill = (d.status !== "committed" && d.error_count)
+        ? `<span class="pill issue">${d.error_count} issue(s)</span>` : "";
+      const counts = d.status === "committed" && d.blocks_written != null
+        ? `${d.blocks_written} block(s), ${d.facts_written} fact(s)`
+        : `${d.block_count} block(s), ${d.fact_count} fact(s)`;
+      const when = fmtWhen(d.committed_at || d.created_at);
+      return `<div class="hist-item${active}" data-act="open" data-id="${d.ingest_id}">
+        <div class="hist-main">
+          <div class="hist-name">${escText(d.source_file || "upload")}</div>
+          <div class="hist-meta">${escText(when)} · ${counts}</div>
+          <div class="hist-badges">${statusPill}${issuePill}</div>
+        </div>
+        <button class="hist-del" title="Delete" data-act="delete" data-id="${d.ingest_id}">×</button>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    histList.innerHTML = `<div class="hist-empty">History unavailable.</div>`;
+  }
+}
+
+async function openRecord(id) {
+  hideBanner();
+  try {
+    const res = await fetch("/api/ingest/drafts/" + id);
+    const data = await res.json();
+    if (!data.ok) { banner("err", data.error || "Could not load record."); loadHistory(); return; }
+    if (data.status === "committed")
+      banner("ok", "Viewing an ingested record (read-only). " +
+        `${data.blocks_written ?? "?"} block(s), ${data.facts_written ?? "?"} fact(s) loaded.`);
+    else
+      banner("ok", "Resumed draft — review and confirm to ingest, or delete.");
+    showPreview(data);
+  } catch (e) {
+    banner("err", "Request failed: " + e.message);
+  }
+}
+
+async function deleteRecord(id) {
+  try {
+    await fetch("/api/ingest/drafts/" + id, { method: "DELETE" });
+  } catch (e) { /* best effort */ }
+  if (id === currentId) { previewEl.style.display = "none"; currentId = null; }
+  await loadHistory();
+}
+
+function showPreview(data) {
+  currentId = data.ingest_id;
+  const committed = data.status === "committed";
+  renderManifest(data.manifest || {});
+  renderList($("#warnCard"), $("#warnList"), data.warnings);
+  renderList($("#errCard"), $("#errList"), data.errors);
+  $("#blockCount").textContent = (data.blocks || []).length;
+  $("#factCount").textContent = (data.facts || []).length;
+  renderTable($("#blocksTable"), BLOCK_COLS, data.blocks || []);
+  renderTable($("#factsTable"), FACT_COLS, data.facts || []);
+
+  // A committed record is read-only history: hide the confirm button, relabel Discard
+  // to Delete (it removes the history entry). A draft keeps the confirm/discard flow.
+  confirmBtn.style.display = committed ? "none" : "";
+  confirmBtn.disabled = (data.errors && data.errors.length) || !data.committable;
+  resetBtn.textContent = committed ? "Delete from history" : "Discard";
+  let note = "";
+  if (committed) note = "Already ingested into Snowflake — this is a saved history record.";
+  else if (data.errors && data.errors.length) note = "Fix the validation errors above before ingesting.";
+  else if (!data.commit_available) note = "Commit unavailable: " + (data.commit_reason || "write connection not configured") + ".";
+  $("#commitNote").textContent = note;
+  renderDiag(data);
+  previewEl.style.display = "block";
+  loadHistory();
+}
+
+async function structure(file) {
+  hideBanner();
+  previewEl.style.display = "none";
+  currentId = null;
+  $("#spinName").textContent = file.name;
+  spinEl.classList.add("show");
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch("/api/ingest/structure", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!data.ok) { banner("err", data.error || "Structuring failed."); return; }
+    if (data.errors && data.errors.length) banner("warn", `Structured with ${data.errors.length} validation issue(s) — saved as a draft. See below.`);
+    else banner("ok", "Structured and saved as a draft. Review the preview, then confirm to ingest.");
+    showPreview(data);
+  } catch (e) {
+    banner("err", "Request failed: " + e.message);
+  } finally {
+    spinEl.classList.remove("show");
+  }
+}
+
+async function commit() {
+  if (!currentId) return;
+  confirmBtn.disabled = true;
+  hideBanner();
+  try {
+    const res = await fetch("/api/ingest/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ingest_id: currentId }),
+    });
+    const data = await res.json();
+    if (!data.ok) { banner("err", data.error || "Ingest failed."); confirmBtn.disabled = false; return; }
+    banner("ok", `Ingested ${data.blocks_written} block(s) and ${data.facts_written} fact(s). ingest_id = ${data.ingest_id}`);
+    previewEl.style.display = "none";
+    currentId = null;
+    loadHistory();
+  } catch (e) {
+    banner("err", "Request failed: " + e.message);
+    confirmBtn.disabled = false;
+  }
+}
+
+// "Discard" (draft) / "Delete from history" (committed) on an open preview removes the
+// record server-side — it was saved to history on structure.
+async function reset() {
+  const id = currentId;
+  previewEl.style.display = "none";
+  currentId = null;
+  fileEl.value = "";
+  hideBanner();
+  if (id) await deleteRecord(id);
+  else await loadHistory();
+}
+
+dropEl.addEventListener("click", () => fileEl.click());
+fileEl.addEventListener("change", () => { if (fileEl.files[0]) structure(fileEl.files[0]); });
+dropEl.addEventListener("dragover", (e) => { e.preventDefault(); dropEl.classList.add("hover"); });
+dropEl.addEventListener("dragleave", () => dropEl.classList.remove("hover"));
+dropEl.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropEl.classList.remove("hover");
+  if (e.dataTransfer.files[0]) structure(e.dataTransfer.files[0]);
+});
+confirmBtn.addEventListener("click", commit);
+resetBtn.addEventListener("click", reset);
+
+histList.addEventListener("click", (e) => {
+  const del = e.target.closest('[data-act="delete"]');
+  if (del) { e.stopPropagation(); deleteRecord(del.getAttribute("data-id")); return; }
+  const item = e.target.closest('[data-act="open"]');
+  if (item) openRecord(item.getAttribute("data-id"));
+});
+
+loadHistory();
+</script>
+</body>
+</html>

@@ -21,3 +21,9 @@ build/
 
 # OS
 .DS_Store
+
+# Un-confirmed ingest drafts (runtime data)
+.ingest_drafts/
+
+# Local sample decks / node scratch (not part of the agent)
+deck/
