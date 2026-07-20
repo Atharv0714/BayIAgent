@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BayI Agent — Security &amp; Access Model</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #faf8ff; --panel: #ffffff; --panel2: #f4f0fb; --border: #ddd0f2;
+    --vborder: #c4aef0; --text: #1e1630; --muted: #6b6480; --accent: #7c3aed;
+    --danger: #e5484d; --ok: #1a7f52; --warn: #8a6100;
+    --bo-pink: #ec6ea9; --bo-magenta: #d6249f; --bo-deep: #c21e73; --bo-purple: #7a4e96;
+    --display: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header { padding: 22px 28px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 {
+    font-family: var(--display); font-weight: 800; font-size: 22px; margin: 0;
+    display: flex; align-items: baseline; gap: 9px;
+  }
+  header h1 .wm {
+    font-size: 24px; text-transform: uppercase; letter-spacing: .02em;
+    background: linear-gradient(120deg, var(--bo-purple), var(--bo-deep) 55%, var(--bo-pink));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  header .sub { color: var(--muted); font-size: 13px; margin-top: 4px; max-width: 90ch; }
+  header .status {
+    display: inline-block; margin-top: 10px; font-family: var(--display); font-weight: 700;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--ok);
+    background: #e7f6ee; border: 1px solid #bfe6d1; border-radius: 999px; padding: 4px 12px;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 8px 28px 80px; }
+  h2 {
+    font-family: var(--display); font-weight: 700; font-size: 18px; margin: 40px 0 6px;
+    color: var(--accent); display: flex; align-items: center; gap: 10px;
+  }
+  h2 .n {
+    font-size: 13px; background: var(--accent); color: #fff; width: 26px; height: 26px;
+    border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; flex: none;
+  }
+  h3 { font-family: var(--display); font-size: 14px; margin: 22px 0 8px; color: var(--text);
+    text-transform: uppercase; letter-spacing: .04em; }
+  p { margin: 8px 0; }
+  .lede { color: var(--muted); max-width: 80ch; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 20px; margin: 16px 0;
+  }
+  .mermaid { display: flex; justify-content: center; margin: 6px 0; }
+  .roles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 14px 0; }
+  .role {
+    border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: var(--panel);
+    border-top: 4px solid var(--accent);
+  }
+  .role.r2 { border-top-color: var(--danger); }
+  .role.r3 { border-top-color: var(--bo-deep); }
+  .role h4 { font-family: var(--display); margin: 0 0 4px; font-size: 15px; }
+  .role .who { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+  .role ul { margin: 0; padding-left: 18px; font-size: 13px; }
+  .role .members { margin-top: 10px; font-size: 12.5px; }
+  .role .members b { font-family: var(--display); }
+  .chip {
+    display: inline-block; font-size: 11.5px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 999px; padding: 2px 9px; margin: 3px 4px 0 0;
+  }
+  .grp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin: 12px 0; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); font-family: var(--display); font-weight: 700; }
+  td.y { color: var(--ok); font-weight: 700; }
+  td.n { color: var(--danger); font-weight: 700; }
+  .note {
+    border-left: 4px solid var(--vborder); background: var(--panel2); border-radius: 0 10px 10px 0;
+    padding: 12px 16px; margin: 16px 0; font-size: 13.5px;
+  }
+  .note.warn { border-left-color: var(--warn); background: #fef6e7; }
+  .note.ok { border-left-color: var(--ok); background: #e7f6ee; }
+  .note strong { font-family: var(--display); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+  .legend { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .boundary { color: var(--bo-deep); font-weight: 700; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="wm">BayI</span> <span>Security &amp; Access Model</span></h1>
+  <div class="sub">How authentication, permissions, and data sensitivity fit together once the agent runs at a shared URL. Three data classes: shared <strong>internal</strong> knowledge, <strong>private</strong> data that only the person who ingested it can see, and <strong>protected</strong> data readable only by one privileged group.</div>
+  <span class="status">Finalized model · deployment paused</span>
+</header>
+
+<main>
+
+  <p class="lede">Three enforcement layers stack from the outside in: <strong>Azure Easy Auth / SharePoint (M365)</strong> proves <em>who you are</em> (Entra, BayOne tenant only) and carries your <em>group membership</em>, the <strong>application</strong> binds that identity + group flag to every request, and <strong>Snowflake row-access policies</strong> are the last line that physically decides <em>which rows you can see</em> — internal rows for everyone, private rows only for their <em>owner</em>, protected rows only for the privileged group — even if the model writes <code>SELECT&nbsp;*</code>.</p>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">1</span> Three data classes — internal, per-owner private, group-protected</h2>
+  <p class="lede">Sensitivity is a property of the <em>data</em>. <strong>Any</strong> authenticated BayOne user can flip an upload to <strong>private</strong> (owned by them, visible only to them). One privileged group can additionally mark an upload <strong>protected</strong> — visible to every member of that group, but no one else. Everything else is <strong>internal</strong> — shared knowledge every signed-in user can query.</p>
+
+  <div class="roles" style="grid-template-columns: repeat(3, 1fr);">
+    <div class="role r1">
+      <h4>Internal — shared knowledge</h4>
+      <div class="who">The default. Visible to every authenticated BayOne user.</div>
+      <ul>
+        <li>Ingested in normal mode</li>
+        <li>Queryable by all staff</li>
+        <li>Stored with <code>SENSITIVITY = internal</code></li>
+        <li>No owner restriction</li>
+      </ul>
+    </div>
+    <div class="role r2">
+      <h4>Private — owned by the ingester</h4>
+      <div class="who">Anyone can create it. Readable only by its owner.</div>
+      <ul>
+        <li>Ingested with the <strong>"Private — only me"</strong> option</li>
+        <li>Always <strong>ingest-only</strong> — never written to local disk</li>
+        <li>Stored with <code>SENSITIVITY = private</code> and <code>INGESTED_BY = your email</code></li>
+        <li>Queries return <em>your</em> private rows — never anyone else's</li>
+      </ul>
+    </div>
+    <div class="role r3">
+      <h4>Protected — one privileged group</h4>
+      <div class="who">Only <span class="grp">SG-BayI-Sensitive</span> members can create or read it.</div>
+      <ul>
+        <li>The <strong>"Protected — my group only"</strong> option appears only for group members</li>
+        <li>Always <strong>ingest-only</strong> — never written to local disk</li>
+        <li>Stored with <code>SENSITIVITY = protected</code></li>
+        <li>Queries return protected rows only when the caller is in the group</li>
+      </ul>
+    </div>
+  </div>
+  <div class="note ok"><strong>Two tiers open to all, one gated.</strong> The <em>private</em> option is on every user's ingest screen — no membership list, isolation is by <em>owner identity</em>. The <em>protected</em> option appears only for members of the single privileged Entra/M365 group (<span class="grp">SG-BayI-Sensitive</span>); membership is decided per request from the group claim, never from row data.</div>
+  <div class="note warn"><strong>One break-glass exception.</strong> A single named admin/compliance role (<span class="grp">BAYI_ADMIN_READ</span>) can read <em>all</em> private and protected data for offboarding or legal need, and every such read is logged. This is the one path by which confidential data outlives its owner (or the group) leaving the company.</div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">2</span> Authentication — getting to the URL</h2>
+  <p class="lede">One HTTPS URL. Azure App Service's built-in authentication ("Easy Auth") sits in front of the app: no valid Entra session, no bytes reach the agent. The app writes zero OAuth code — it reads the identity Azure injects.</p>
+
+  <div class="card">
+  <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant U as User browser
+    participant AA as Azure Easy Auth<br/>(BayOne tenant)
+    participant E as Microsoft Entra ID
+    participant APP as BayI app
+    U->>AA: GET https://bayi.bayone.com (TLS)
+    alt no valid session
+        AA-->>U: 302 redirect to Microsoft login
+        U->>E: Sign in (BayOne tenant only)
+        E-->>AA: ID token + group claims
+        AA-->>U: Set session cookie
+    end
+    U->>AA: Request with session
+    AA->>APP: Forward + inject identity & group headers
+    Note over AA,APP: X-MS-CLIENT-PRINCIPAL-NAME (email)<br/>+ group claim (Entra/M365 membership)<br/>= the server-trusted caller identity + groups
+    APP->>APP: Bind identity + protected-group flag to the request<br/>(owner stamp on ingest, row filter on query)
+    APP-->>U: App loads for the caller
+  </pre>
+  <p class="legend"><span class="boundary">Trust boundary 1:</span> the public internet stops at Azure Easy Auth (on the SharePoint/M365 deployment, the same Entra sign-in). Single-tenant = only BayOne Entra accounts authenticate at all — that <em>is</em> the "anyone with a BayOne email" rule. The email <em>and the group claim</em> in these headers are the <strong>caller identity and membership</strong> the rest of the model relies on; the client cannot set or forge them.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">3</span> Permissions — who can do what</h2>
+  <table>
+    <thead>
+      <tr><th>Capability</th><th>Any authenticated user<br><span style="font-weight:400;color:var(--muted)">all BayOne staff</span></th><th>Protected-group member<br><span style="font-weight:400;color:var(--muted)">SG-BayI-Sensitive</span></th><th>Break-glass admin<br><span style="font-weight:400;color:var(--muted)">BAYI_ADMIN_READ · logged</span></th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Open the app / sign in</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Query internal (shared) data</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Ingest internal documents</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Use the "Private — only me" option</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Write <code>private</code> rows they own (ingest-only)</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Query their <strong>own</strong> private rows</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Query <strong>another user's</strong> private rows</td><td class="n">No</td><td class="n">No</td><td class="y">Yes <span style="font-weight:400;color:var(--muted)">(logged)</span></td></tr>
+      <tr><td>Use the "Protected — my group" option</td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Write <code>protected</code> rows (ingest-only)</td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><td>Query <code>protected</code> group data</td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes <span style="font-weight:400;color:var(--muted)">(logged)</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note"><strong>Server-enforced, always.</strong> The owner stamped on private data and the group flag on protected data are both taken from the server-injected Easy Auth / group headers — never from client input — so a user cannot write data as someone else, cannot read rows they don't own, and cannot smuggle rows into the protected tier without being in the group. Enforcement is in the database (next sections); the UI is only convenience.</div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">4</span> The sensitivity selector — ingest path</h2>
+  <p class="lede">Every user's ingest screen offers <strong>Shared</strong> and <strong>Private</strong>; group members additionally see <strong>Protected</strong>. Choosing <strong>Private</strong> or <strong>Protected</strong> forces the <strong>ingest-only</strong> path (never written to local disk). The server stamps the owner from the authenticated identity header, and re-checks group membership before accepting a protected upload — so a non-member cannot post their way into the group tier.</p>
+
+  <div class="card">
+  <pre class="mermaid">
+flowchart TD
+    A[Authenticated BayOne user opens Ingest] --> B[Structure with Claude then preview]
+    B --> C{Sensitivity?}
+    C -- Internal / shared --> G[Commit as SENSITIVITY = internal<br/>draft may be saved]
+    C -- Private / only me --> H[Forced ingest-only<br/>nothing kept locally]
+    H --> I[Server stamps INGESTED_BY = caller<br/>from Easy Auth header, not client input]
+    I --> K[Commit as SENSITIVITY = private]
+    C -- Protected / my group --> M{Caller in SG-BayI-Sensitive?}
+    M -- No --> N[Rejected 403<br/>non-members cannot author protected]
+    M -- Yes --> P[Forced ingest-only<br/>nothing kept locally]
+    P --> Q[Commit as SENSITIVITY = protected<br/>INGESTED_BY = caller for audit]
+    G --> L[(Snowflake KB tables<br/>via write-only role)]
+    K --> L
+    Q --> L
+  </pre>
+  <p class="legend">The write role can <code>INSERT</code> only — no read-back, no DDL. Both KB tables carry a <code>SENSITIVITY</code> column (<code>internal</code> / <code>private</code> / <code>protected</code>) and an <code>INGESTED_BY</code> column (the ingester's email; empty for internal rows). Protected rows are scoped by <em>group</em> at query time, so <code>INGESTED_BY</code> on them is an audit trail rather than the access key.</p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">5</span> Query path — how isolation is actually enforced</h2>
+  <p class="lede">This is the load-bearing part. Since the agent writes its own SQL, isolation can't rely on the app filtering nicely. Enforcement moves <strong>into Snowflake</strong>: one read role plus a <strong>row-access policy</strong> that compares each private row's <code>INGESTED_BY</code> to the caller and gates each protected row on the caller's group flag. The app binds both the caller identity and the protected-group flag to the Snowflake session before the agent runs its query.</p>
+
+  <div class="card">
+  <pre class="mermaid">
+flowchart TD
+    Q[User asks a question] --> R[App binds BAYI_CALLER = identity<br/>and BAYI_PROTECTED = in-group? to the session]
+    R --> S[BAYI_READ connection<br/>admin path: BAYI_ADMIN_READ]
+    S --> U[Claude agent writes SQL<br/>SELECT-only, row cap]
+    U --> V[(Snowflake runs the query)]
+    V --> W{{Row-access policy on tables}}
+    W -- internal row --> X[Returned to everyone]
+    W -- private row, INGESTED_BY = caller --> Y[Returned to its owner]
+    W -- protected row, caller in group --> YP[Returned to group members]
+    W -- private, other owner / protected, non-member --> Z[Dropped<br/>unless role = BAYI_ADMIN_READ]
+    X --> ZZ[Grounded answer: shared data + the caller's own<br/>private data + group data if a member]
+    Y --> ZZ
+    YP --> ZZ
+  </pre>
+  <p class="legend"><span class="boundary">Defense in depth:</span> even if a prompt-injected document coaxes the model into <code>SELECT * FROM …</code>, a caller's connection <em>physically cannot</em> return another user's private rows or a non-member's protected rows — the database drops them before results leave Snowflake.</p>
+  </div>
+
+  <h3>The Snowflake pieces</h3>
+  <table>
+    <thead><tr><th>Object</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>BAYI_READ</code> role</td><td>SELECT on the KB tables; the row policy filters rows to internal + the caller's own private rows + protected rows when the caller's group flag is set.</td></tr>
+      <tr><td><code>BAYI_ADMIN_READ</code> role</td><td>Break-glass. SELECT with the row policy allowing all rows, including every user's private data and all protected data. Rare, and every use is logged.</td></tr>
+      <tr><td><code>BAYI_INGEST_WRITE</code> role</td><td>INSERT only, on the two ingest tables. No read, no DDL.</td></tr>
+      <tr><td>Row-access policy <code>rap_ownership</code></td><td>Returns a row when <code>SENSITIVITY = 'internal'</code> OR (<code>SENSITIVITY = 'private'</code> AND <code>INGESTED_BY = getvariable('BAYI_CALLER')</code>) OR (<code>SENSITIVITY = 'protected'</code> AND <code>getvariable('BAYI_PROTECTED') = 'true'</code>) OR <code>CURRENT_ROLE() = 'BAYI_ADMIN_READ'</code>. Attached to both KB tables.</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><strong>The one trust assumption.</strong> Isolation depends on the app binding both the caller identity (<code>BAYI_CALLER</code>) and the protected-group flag (<code>BAYI_PROTECTED</code>) to the Snowflake session from the <em>server-injected</em> Easy Auth / group headers (never client input) and resetting them when a pooled connection is reused. Agent runs are already serialized on the shared connector, so setting both per request fits cleanly. The exact Snowflake mechanism (session variables read by the policy, or a per-request session) is a build-time detail to confirm.</div>
+  <div class="note warn"><strong>Replaces <code>ACCOUNTADMIN</code>.</strong> Today both read and write run as <code>ACCOUNTADMIN</code> (full account control). These least-privilege roles retire that for the app entirely — the single biggest risk reduction on this list.</div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">6</span> Where each control lives (trust boundaries)</h2>
+  <div class="card">
+  <pre class="mermaid">
+flowchart LR
+    subgraph PUB[Public internet]
+      U[BayOne staff browser]
+    end
+    subgraph AZ[Azure App Service]
+      direction TB
+      AA[Easy Auth gate<br/>Entra single-tenant]
+      APP[BayI app<br/>binds caller identity + group flag<br/>server-side owner stamp]
+      DISK[(Azure Files<br/>internal draft history)]
+      AA --> APP
+      APP --- DISK
+    end
+    subgraph SF[Snowflake account]
+      direction TB
+      RD[BAYI_READ<br/>+ BAYI_ADMIN_READ break-glass]
+      WR[BAYI_INGEST_WRITE role]
+      RAP{{Row-access policy<br/>filters by owner + group flag}}
+      RD --> RAP
+      WR --> RAP
+    end
+    ANT[Anthropic API<br/>no-train + ZDR for private/protected]
+    U -->|HTTPS| AA
+    APP -->|identity + group flag bound to session| RD
+    APP -->|insert only| WR
+    APP -->|structuring + Q and A| ANT
+  </pre>
+  <p class="legend">
+    <span class="boundary">Boundary 1</span> — internet → Azure/SharePoint: only authenticated BayOne accounts pass; the Entra group claim rides along.<br>
+    <span class="boundary">Boundary 2</span> — app → Snowflake: the app binds the caller identity and protected-group flag to the session; the DB enforces per-owner and per-group row visibility.<br>
+    <span class="boundary">Boundary 3</span> — app → Anthropic: commercial terms (no training); private and protected uploads are ingest-only and a ZDR agreement removes retention.
+  </p>
+  </div>
+
+  <!-- ============================================================ -->
+  <h2><span class="n">7</span> Decisions — locked</h2>
+  <table>
+    <thead><tr><th>#</th><th>Decision</th><th>Answer</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Sensitivity model</td><td>Three data classes: <code>internal</code> (shared), <code>private</code> (per-owner), and <code>protected</code> (one privileged group). Reinstates the group tier above per-owner private.</td></tr>
+      <tr><td>2</td><td>Who can create private data</td><td>Any authenticated BayOne user — no group, no approval.</td></tr>
+      <tr><td>3</td><td>Who can create protected data</td><td>Only members of the single privileged Entra/M365 group (<code>SG-BayI-Sensitive</code>) — gated server-side at ingest.</td></tr>
+      <tr><td>4</td><td>Private visibility</td><td>Only the owner (the person who ingested it), enforced by the row-access policy on <code>INGESTED_BY</code>.</td></tr>
+      <tr><td>5</td><td>Protected visibility</td><td>Every member of the privileged group, enforced by the policy on a per-request group flag (<code>BAYI_PROTECTED</code>) — not by row owner.</td></tr>
+      <tr><td>6</td><td>Break-glass</td><td>One named admin/compliance role (<code>BAYI_ADMIN_READ</code>) can read all private and protected data, logged, for offboarding/legal.</td></tr>
+      <tr><td>7</td><td>Identity &amp; group source</td><td>The Easy Auth-injected email and the Entra/M365 group claim — server-stamped, never client-settable.</td></tr>
+      <tr><td>8</td><td>Private &amp; protected uploads</td><td>Always ingest-only — never written to local disk.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note"><strong>Three inputs still needed before build:</strong> (a) who holds the <code>BAYI_ADMIN_READ</code> break-glass role and how its use is logged/reviewed; (b) confirmation of the Snowflake mechanism that carries the caller identity + group flag into the session for the row-access policy to read; (c) the exact group claim SharePoint/M365 surfaces (name vs. object-id) so <code>PROTECTED_GROUP</code> / <code>GROUPS_HEADER</code> map onto it.</div>
+
+  <p class="lede" style="margin-top:24px">Design artifact only. The build order is: least-privilege Snowflake roles (<code>BAYI_READ</code>, <code>BAYI_ADMIN_READ</code>, <code>BAYI_INGEST_WRITE</code>) + <code>SENSITIVITY</code> and <code>INGESTED_BY</code> columns + row policy → Easy Auth identity + group wiring → the sensitivity selector (Shared / Private / Protected, forcing ingest-only, server-stamped owner, group-gated protected) → per-request session binding of identity and group flag at query time.</p>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: 'Montserrat, sans-serif',
+      primaryColor: '#f4f0fb',
+      primaryBorderColor: '#c4aef0',
+      primaryTextColor: '#1e1630',
+      lineColor: '#7a4e96',
+      secondaryColor: '#ffffff',
+      tertiaryColor: '#faf8ff'
+    }
+  });
+</script>
+</body>
+</html>

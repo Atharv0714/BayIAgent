@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from sf_agent.connection import SnowflakeConnection
-from sf_agent.ingest import StructuredResult
+from sf_agent.ingest import SENSITIVITIES, StructuredResult
 
 # Fixed column order for `blocks` (17 guide fields + ingest_id). `id` is a surrogate
 # the table auto-assigns and is NOT written here.
@@ -35,6 +35,9 @@ BLOCK_COLS = (
     "source_modified_at",
     "extracted_at",
     "ingest_id",
+    "sensitivity",
+    "sensitivity_category",
+    "ingested_by",
 )
 
 # Fixed column order for `facts` (13 guide fields + ingest_id).
@@ -53,6 +56,9 @@ FACT_COLS = (
     "confidence",
     "notes",
     "ingest_id",
+    "sensitivity",
+    "sensitivity_category",
+    "ingested_by",
 )
 
 # Integer block fields cast on the way in so a JSON float ("2.0") lands as an int.
@@ -80,7 +86,10 @@ CREATE TABLE IF NOT EXISTS blocks (
     source_file VARCHAR,
     source_modified_at DATE,
     extracted_at DATE,
-    ingest_id VARCHAR
+    ingest_id VARCHAR,
+    sensitivity VARCHAR DEFAULT 'internal',
+    sensitivity_category VARCHAR DEFAULT 'general',
+    ingested_by VARCHAR
 )
 """
 
@@ -100,7 +109,10 @@ CREATE TABLE IF NOT EXISTS facts (
     raw_value VARCHAR,
     confidence FLOAT,
     notes VARCHAR,
-    ingest_id VARCHAR
+    ingest_id VARCHAR,
+    sensitivity VARCHAR DEFAULT 'internal',
+    sensitivity_category VARCHAR DEFAULT 'general',
+    ingested_by VARCHAR
 )
 """
 
@@ -129,24 +141,65 @@ def _coerce_block(value: Any, col: str) -> Any:
     return value
 
 
-def _row_tuple(record: dict[str, Any], cols: tuple[str, ...], ingest_id: str) -> tuple[Any, ...]:
+def _row_tuple(
+    record: dict[str, Any], cols: tuple[str, ...], injected: dict[str, Any]
+) -> tuple[Any, ...]:
+    """Build a row tuple in `cols` order. Server-set columns (ingest_id, sensitivity,
+    sensitivity_category, ingested_by) come from `injected`; everything else from the
+    validated record."""
     values: list[Any] = []
     for col in cols:
-        if col == "ingest_id":
-            values.append(ingest_id)
+        if col in injected:
+            values.append(injected[col])
         else:
             values.append(_coerce_block(record.get(col), col))
     return tuple(values)
 
 
-def write(conn: SnowflakeConnection, structured: StructuredResult, ingest_id: str) -> tuple[int, int]:
+def _injected_for(rec: dict[str, Any], ingest_id: str, default_tier: str, ingested_by: str | None):
+    """Per-row server-set columns: honor the row's own (server-vetted) `sensitivity`
+    when present, else fall back to `default_tier`. `ingested_by` is stamped only on
+    confidential rows so internal rows stay shared and unowned."""
+    tier = rec.get("sensitivity")
+    if tier not in SENSITIVITIES:
+        tier = default_tier
+    return {
+        "ingest_id": ingest_id,
+        "sensitivity": tier,
+        # Human-facing label mirroring the enforcement enum: the default `internal`
+        # tier reads as "general"; the confidential tiers keep their own name.
+        "sensitivity_category": "general" if tier == "internal" else tier,
+        "ingested_by": ingested_by if tier != "internal" else None,
+    }
+
+
+def write(
+    conn: SnowflakeConnection,
+    structured: StructuredResult,
+    ingest_id: str,
+    sensitivity: str = "internal",
+    ingested_by: str | None = None,
+) -> tuple[int, int]:
     """Load a validated payload's blocks then facts, tagged with `ingest_id`.
+
+    Each row's tier comes from its own server-vetted `sensitivity` field (set by the
+    structure/edit endpoints), falling back to the `sensitivity` default for rows that
+    carry none — so a uniform-tier upload and a per-row-edited one both work. `ingested_by`
+    (the caller's identity) is stamped by the server only on confidential rows, never
+    taken from the model output, so the row-access policy can isolate an owner's data.
+    Defaults keep a row shared and unowned, matching pre-feature behavior.
 
     Returns (blocks_written, facts_written). Each table is inserted under its own
     commit inside `executemany`.
     """
-    block_rows = [_row_tuple(b, BLOCK_COLS, ingest_id) for b in structured.blocks]
-    fact_rows = [_row_tuple(f, FACT_COLS, ingest_id) for f in structured.facts]
+    block_rows = [
+        _row_tuple(b, BLOCK_COLS, _injected_for(b, ingest_id, sensitivity, ingested_by))
+        for b in structured.blocks
+    ]
+    fact_rows = [
+        _row_tuple(f, FACT_COLS, _injected_for(f, ingest_id, sensitivity, ingested_by))
+        for f in structured.facts
+    ]
 
     blocks_written = conn.executemany(_insert_sql("blocks", BLOCK_COLS), block_rows)
     facts_written = conn.executemany(_insert_sql("facts", FACT_COLS), fact_rows)

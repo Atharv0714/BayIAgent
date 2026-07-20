@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,17 @@ _CONTENT_TYPES = {
 }
 _BLOCK_STATUSES = {"filled", "partial", "placeholder"}
 _UNITS = {"usd", "usd_per_hour", "pct", "count", "score", "ratio", "date", "unknown"}
+
+# The three data tiers, most-open to most-restricted. Single source of truth: the write
+# path (ingest_store) and the web layer both import this so the closed set never drifts.
+#   * internal  — shared with everyone (default; no identity required).
+#   * private   — owned by the ingester; only they (plus break-glass admin) can read it.
+#   * protected — group-scoped; only the single privileged Entra group can read it.
+SENSITIVITIES = ("internal", "private", "protected")
+
+# Fact fields the UI may edit that must be re-typed after a manual edit (the browser
+# sends everything as strings). Kept next to the block int-fields the loader coerces.
+_FACT_NUMBER_FIELDS = {"value_num", "confidence"}
 
 # Block fields that must be present and non-null (guide validation gates).
 _REQUIRED_BLOCK_FIELDS = (
@@ -196,6 +208,85 @@ def validate(data: dict[str, Any]) -> tuple[list[str], list[str]]:
         warnings.append(str(w))
 
     return warnings, errors
+
+
+def stamp_sensitivity(structured: "StructuredResult", tier: str) -> None:
+    """Set every block's and fact's ``sensitivity`` field to ``tier`` in place.
+
+    Called right after structuring so the model's own output can never decide a row's
+    tier — the server overwrites all of them with the author's chosen default. The
+    post-structure editor then refines individual rows through the validated /edit gate.
+    """
+    if tier not in SENSITIVITIES:
+        tier = "internal"
+    for rec in structured.blocks:
+        rec["sensitivity"] = tier
+    for rec in structured.facts:
+        rec["sensitivity"] = tier
+
+
+def _to_number(value: Any) -> Any:
+    """Coerce a browser-supplied string to int/float; blank -> None; leave others as-is."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            try:
+                return float(s)
+            except ValueError:
+                return s
+    return value
+
+
+def coerce_for_validation(
+    blocks: list[dict[str, Any]], facts: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-type manually edited rows so ``validate`` behaves like the model path.
+
+    The browser sends all cell values as strings; this restores the numeric/None shapes
+    the validator (and later the loader) expect: block int fields, fact numeric fields,
+    and blank strings on optional fields collapse to None. Returns new lists; inputs are
+    not mutated. Unknown keys pass through untouched.
+    """
+    int_fields = {"block_index", "section_number", "block_order"}
+    out_blocks: list[dict[str, Any]] = []
+    for b in blocks:
+        rec = dict(b)
+        for f in int_fields:
+            if f in rec:
+                rec[f] = _to_number(rec[f])
+        out_blocks.append(rec)
+    out_facts: list[dict[str, Any]] = []
+    for f in facts:
+        rec = dict(f)
+        for k in _FACT_NUMBER_FIELDS:
+            if k in rec:
+                rec[k] = _to_number(rec[k])
+        out_facts.append(rec)
+    return out_blocks, out_facts
+
+
+def tier_requirements(tiers: Iterable[str]) -> tuple[bool, bool]:
+    """From the tiers present in a payload, what must the caller prove?
+
+    Returns ``(needs_identity, needs_group)``:
+      * ``needs_identity`` — any row is private or protected (confidential rows must be
+        owned, so the caller must resolve to an identity).
+      * ``needs_group`` — any row is protected (only the privileged group may author it).
+    """
+    tier_set = set(tiers)
+    needs_group = "protected" in tier_set
+    needs_identity = needs_group or "private" in tier_set
+    return needs_identity, needs_group
 
 
 def structure_upload(

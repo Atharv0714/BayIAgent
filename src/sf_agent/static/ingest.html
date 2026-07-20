@@ -103,6 +103,25 @@
   .drop strong { color: var(--text); font-family: var(--display); }
   .drop .types { font-size: 12px; margin-top: 8px; }
 
+  .ingestonly {
+    display: flex; align-items: flex-start; gap: 10px; margin: 14px 2px 0;
+    font-size: 12.5px; color: var(--muted); cursor: pointer; line-height: 1.45;
+  }
+  .ingestonly input { margin-top: 2px; flex: none; accent-color: var(--accent); width: 15px; height: 15px; }
+  .ingestonly strong { color: var(--text); font-family: var(--display); font-weight: 600; }
+  .ingestonly:has(input:checked) { color: var(--accent); }
+  .ingestonly:has(input:checked) strong { color: var(--accent); }
+
+  .sensitivity {
+    margin: 14px 2px 0; padding: 12px 14px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel); display: flex; flex-direction: column; gap: 2px;
+  }
+  .sensitivity > h3 {
+    font-family: var(--display); font-weight: 700; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); margin: 0 0 4px;
+  }
+  .sensitivity .ingestonly { margin: 6px 0; }
+
   .banner { border-radius: 10px; padding: 12px 14px; margin: 16px 0; font-size: 14px; display: none; }
   .banner.show { display: block; }
   .banner.err { background: #fdecec; color: var(--danger); border: 1px solid #f4c7c7; }
@@ -146,6 +165,43 @@
   .diag table { width: auto; border-collapse: collapse; margin: 4px 0 10px; }
   .diag td { border: 0; padding: 4px 16px 4px 0; font-size: 12.5px; white-space: nowrap; }
   .diag td.k { color: var(--muted); font-weight: 600; }
+
+  /* Post-structuring classification + edit controls. */
+  .classbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 12px;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+  }
+  .classbar .grp { display: flex; align-items: center; gap: 6px; }
+  .classbar .lbl {
+    font-family: var(--display); font-weight: 700; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted);
+  }
+  .classbar button { padding: 5px 10px; font-size: 12px; }
+  .classbar .themes { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+  .classbar .theme { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .classbar .theme span {
+    max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text);
+  }
+  select.tier-select, .classbar select {
+    font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border);
+    border-radius: 6px; background: #fff; color: var(--text); font-family: var(--display); font-weight: 600;
+  }
+  select.tier-select[data-val="private"] { border-color: var(--accent); color: var(--accent); }
+  select.tier-select[data-val="protected"] { border-color: var(--bo-deep); color: var(--bo-deep); }
+  .classbar .instruct { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 2px; }
+  .classbar .instruct input {
+    flex: 1; min-width: 200px; font: inherit; font-size: 12px; padding: 5px 8px;
+    border: 1px solid var(--border); border-radius: 6px; background: #fff; color: var(--text);
+  }
+  table.edit input, table.edit textarea {
+    font: inherit; font-size: 12px; width: 100%; min-width: 90px; border: 1px solid transparent;
+    border-radius: 5px; padding: 3px 5px; background: transparent; color: var(--text); resize: vertical;
+  }
+  table.edit input:focus, table.edit textarea:focus {
+    border-color: var(--vborder); background: #fff; outline: none;
+  }
+  table.edit td { max-width: 340px; white-space: normal; }
+  table.edit textarea { min-width: 200px; }
 </style>
 </head>
 <body>
@@ -166,6 +222,31 @@
     <div class="types">PDF · PNG/JPG · TXT · MD · CSV · HTML · JSON · EML &nbsp;·&nbsp; Office files: convert to PDF first</div>
     <input id="file" type="file" hidden />
   </div>
+
+  <div class="sensitivity" id="sensitivityGroup" style="display:none">
+    <h3>Who can see this data?</h3>
+    <label class="ingestonly">
+      <input type="radio" name="sensitivity" value="internal" checked />
+      <span><strong>Shared — everyone.</strong>
+      Anyone with access to BayI can query this data. This is the default.</span>
+    </label>
+    <label class="ingestonly">
+      <input type="radio" name="sensitivity" value="private" />
+      <span><strong>Private — only I can see this.</strong>
+      The ingested rows are owned by you: only you (plus a logged break-glass admin) can query them. Everyone else's questions never surface this data. Ingest-only — nothing is saved on this platform.</span>
+    </label>
+    <label class="ingestonly" id="protectedWrap" style="display:none">
+      <input type="radio" name="sensitivity" value="protected" />
+      <span><strong>Protected — my group only.</strong>
+      Readable and queryable only by members of <em id="protectedGroupName">the protected group</em>. Use this for group-restricted material. Ingest-only — nothing is saved on this platform.</span>
+    </label>
+  </div>
+
+  <label class="ingestonly" id="ingestOnlyWrap" title="For sensitive uploads: the structured data is held in memory only, never written to this server's disk. After you ingest, it exists solely in Snowflake.">
+    <input type="checkbox" id="ingestOnly" />
+    <span><strong>Ingest only — don't save a draft on this platform.</strong>
+    The structured data is kept in memory only and never written to disk. After ingestion it lives solely in Snowflake; nothing is retained here (and it's discarded if you leave without ingesting).</span>
+  </label>
 
   <div id="spin" class="spin">Structuring <strong id="spinName"></strong> with Claude… this can take a moment.</div>
   <div id="banner" class="banner"></div>
@@ -190,6 +271,24 @@
       <ul class="plain" id="errList"></ul>
     </section>
 
+    <div class="classbar" id="classBar" style="display:none">
+      <div class="grp">
+        <span class="lbl">Set all</span>
+        <button type="button" data-all="internal">General</button>
+        <button type="button" data-all="private">Private</button>
+        <button type="button" data-all="protected" id="allProtectedBtn" style="display:none">Protected</button>
+      </div>
+      <div class="grp" style="flex:1; min-width:220px">
+        <span class="lbl">By theme</span>
+        <div class="themes" id="themeControls"></div>
+      </div>
+      <div class="grp instruct" style="flex-basis:100%">
+        <span class="lbl">Ask the editor</span>
+        <input type="text" id="instructInput" placeholder="e.g. anything about margins made off consultants → protected" />
+        <button type="button" id="instructBtn" class="primary">Apply</button>
+      </div>
+    </div>
+
     <section class="card">
       <h2>Blocks (<span id="blockCount">0</span>)</h2>
       <div class="tablewrap"><table id="blocksTable"></table></div>
@@ -201,6 +300,7 @@
     </section>
 
     <div class="actions">
+      <button id="saveBtn" style="display:none">Save edits</button>
       <button id="confirmBtn" class="primary">Confirm &amp; ingest</button>
       <button id="resetBtn">Discard</button>
       <span class="muted" id="commitNote"></span>
@@ -223,8 +323,40 @@ const FACT_COLS = ["fact_id","source_file","source_locator","entity_type","entit
 
 const dropEl = $("#drop"), fileEl = $("#file"), spinEl = $("#spin"), bannerEl = $("#banner");
 const previewEl = $("#preview"), confirmBtn = $("#confirmBtn"), resetBtn = $("#resetBtn");
-const histList = $("#histList");
+const histList = $("#histList"), ingestOnlyEl = $("#ingestOnly");
+const sensitivityGroup = $("#sensitivityGroup"), protectedWrap = $("#protectedWrap");
+
+function selectedSensitivity() {
+  const el = document.querySelector('input[name="sensitivity"]:checked');
+  return el ? el.value : "internal";
+}
+
+// Confidential tiers (private / protected) are ingest-only by definition: force + lock
+// the ingest-only checkbox whenever a confidential tier is picked, unlock for "shared".
+sensitivityGroup.addEventListener("change", () => {
+  if (selectedSensitivity() !== "internal") { ingestOnlyEl.checked = true; ingestOnlyEl.disabled = true; }
+  else { ingestOnlyEl.disabled = false; }
+});
+
 let currentId = null;
+let currentPreview = null;  // last rendered payload, so the prompt editor can re-render onto it
+// Caller capabilities, filled from /api/whoami. Drives whether the classification editor
+// is shown and whether "Protected" is an offered tier.
+let WHOAMI = { enforce: false, is_protected_member: false, protected_group: null };
+const TIER_LABELS = { internal: "General", private: "Private", protected: "Protected" };
+
+// Ask the server who we are: the confidential tiers only mean something once ownership
+// enforcement is on, and "Protected" is offered only to members of the privileged group.
+fetch("/api/whoami").then(r => r.json()).then(w => {
+  if (!w || !w.ok) return;
+  WHOAMI = { enforce: !!w.enforce, is_protected_member: !!w.is_protected_member, protected_group: w.protected_group || null };
+  if (!w.enforce) return;   // enforcement off → keep everything shared
+  sensitivityGroup.style.display = "";
+  if (w.is_protected_member) {
+    protectedWrap.style.display = "";
+    if (w.protected_group) $("#protectedGroupName").textContent = w.protected_group;
+  }
+}).catch(() => {});
 
 function fmtWhen(iso) {
   if (!iso) return "";
@@ -270,14 +402,119 @@ function cell(v) {
   const esc = s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return `<td title="${esc}">${esc}</td>`;
 }
+// The leading tier column persists to Snowflake as `sensitivity_category`; show that
+// header so the UI matches the stored column, while the data key stays `sensitivity`.
+function colHeader(c) { return c === "sensitivity" ? "Sensitivity_category" : c; }
+
 function renderTable(el, cols, rows) {
-  const head = "<tr>" + cols.map((c) => `<th>${c}</th>`).join("") + "</tr>";
+  el.className = "";
+  // Committed/read-only view: surface the per-row tier as a leading column when
+  // enforcement is on, so history shows how each row is classified.
+  const showTier = WHOAMI.enforce;
+  const allCols = showTier ? ["sensitivity"].concat(cols) : cols;
+  const head = "<tr>" + allCols.map((c) => `<th>${colHeader(c)}</th>`).join("") + "</tr>";
   if (!rows.length) {
-    el.innerHTML = head + `<tr><td class="muted" colspan="${cols.length}">no rows</td></tr>`;
+    el.innerHTML = head + `<tr><td class="muted" colspan="${allCols.length}">no rows</td></tr>`;
     return;
   }
-  const body = rows.map((r) => "<tr>" + cols.map((c) => cell(r[c])).join("") + "</tr>").join("");
+  const body = rows.map((r) => "<tr>" + allCols.map((c) =>
+    c === "sensitivity" ? cell(TIER_LABELS[r.sensitivity] || "General") : cell(r[c])
+  ).join("") + "</tr>").join("");
   el.innerHTML = head + body;
+}
+
+function escAttr(s) {
+  return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Per-row tier selector. Offers General + Private always; Protected only to a group
+// member (or if the row is already Protected, so an edit never silently drops the tier).
+function tierSelectHtml(selected) {
+  const sel = TIER_LABELS[selected] ? selected : "internal";
+  const tiers = ["internal", "private"];
+  if (WHOAMI.is_protected_member || sel === "protected") tiers.push("protected");
+  const opts = tiers.map((t) =>
+    `<option value="${t}"${t === sel ? " selected" : ""}>${TIER_LABELS[t]}</option>`).join("");
+  return `<select class="tier-select" data-tier data-val="${sel}">${opts}</select>`;
+}
+
+// Long free-text fields get a textarea; everything else a single-line input.
+const LONG_FIELDS = new Set(["text_content", "table_html", "table_markdown", "image_ocr_text", "notes", "value_text"]);
+
+// Editable table for a draft: a tier <select> per row (when enforcing) plus an input/
+// textarea per field. Rows carry data-theme so theme-level bulk-set can target them.
+function renderEditableTable(el, cols, rows, kind) {
+  el.className = "edit";
+  const showTier = WHOAMI.enforce;
+  const allCols = (showTier ? ["sensitivity"] : []).concat(cols);
+  const head = "<tr>" + allCols.map((c) => `<th>${colHeader(c)}</th>`).join("") + "</tr>";
+  if (!rows.length) {
+    el.innerHTML = head + `<tr><td class="muted" colspan="${allCols.length}">no rows</td></tr>`;
+    return;
+  }
+  const body = rows.map((r) => {
+    const theme = r.section_theme == null ? "" : String(r.section_theme);
+    const tierCell = showTier ? `<td>${tierSelectHtml(r.sensitivity)}</td>` : "";
+    const cells = cols.map((c) => {
+      const v = r[c] == null ? "" : String(r[c]);
+      if (LONG_FIELDS.has(c)) return `<td><textarea data-col="${c}" rows="2">${escText(v)}</textarea></td>`;
+      return `<td><input data-col="${c}" value="${escAttr(v)}" /></td>`;
+    }).join("");
+    return `<tr data-kind="${kind}" data-theme="${escAttr(theme)}">${tierCell}${cells}</tr>`;
+  }).join("");
+  el.innerHTML = head + body;
+}
+
+// Gather edited rows back out of an editable table into plain objects for POST /edit.
+function collectRows(el, kind) {
+  const out = [];
+  el.querySelectorAll(`tr[data-kind="${kind}"]`).forEach((tr) => {
+    const obj = {};
+    tr.querySelectorAll("[data-col]").forEach((inp) => { obj[inp.getAttribute("data-col")] = inp.value; });
+    const sel = tr.querySelector("[data-tier]");
+    if (sel) obj.sensitivity = sel.value;
+    out.push(obj);
+  });
+  return out;
+}
+
+// Build the "By theme" controls from the blocks' distinct section_themes (in first-seen
+// order). Each is a <select> that sets every block row sharing that theme.
+function buildThemeControls(blocks) {
+  const seen = [];
+  (blocks || []).forEach((b) => {
+    const t = b.section_theme == null ? "" : String(b.section_theme);
+    if (!seen.includes(t)) seen.push(t);
+  });
+  $("#themeControls").innerHTML = seen.map((t) => {
+    const label = t || "(untitled)";
+    return `<label class="theme"><span title="${escAttr(label)}">${escText(label)}</span>${tierSelectThemeHtml(t)}</label>`;
+  }).join("");
+}
+function tierSelectThemeHtml(theme) {
+  const tiers = ["internal", "private"];
+  if (WHOAMI.is_protected_member) tiers.push("protected");
+  const opts = tiers.map((t) => `<option value="${t}">${TIER_LABELS[t]}</option>`).join("");
+  return `<select data-theme-set="${escAttr(theme)}"><option value="">— set —</option>${opts}</select>`;
+}
+
+// Point every visible tier <select> to a value, updating its data-val (for coloring).
+function setTierSelect(sel, tier) {
+  if (!TIER_LABELS[tier]) return;
+  // A non-member can't author protected; guard even though the option isn't offered.
+  if (tier === "protected" && !WHOAMI.is_protected_member) return;
+  if (![...sel.options].some((o) => o.value === tier)) return;
+  sel.value = tier;
+  sel.setAttribute("data-val", tier);
+}
+function applyTierToAll(tier) {
+  $("#blocksTable").querySelectorAll("[data-tier]").forEach((s) => setTierSelect(s, tier));
+  $("#factsTable").querySelectorAll("[data-tier]").forEach((s) => setTierSelect(s, tier));
+}
+function applyTierToTheme(theme, tier) {
+  $("#blocksTable").querySelectorAll(`tr[data-theme="${CSS.escape(theme)}"] [data-tier]`)
+    .forEach((s) => setTierSelect(s, tier));
 }
 
 function renderManifest(m) {
@@ -364,24 +601,44 @@ async function deleteRecord(id) {
 
 function showPreview(data) {
   currentId = data.ingest_id;
+  currentPreview = data;
   const committed = data.status === "committed";
   renderManifest(data.manifest || {});
   renderList($("#warnCard"), $("#warnList"), data.warnings);
   renderList($("#errCard"), $("#errList"), data.errors);
   $("#blockCount").textContent = (data.blocks || []).length;
   $("#factCount").textContent = (data.facts || []).length;
-  renderTable($("#blocksTable"), BLOCK_COLS, data.blocks || []);
-  renderTable($("#factsTable"), FACT_COLS, data.facts || []);
+
+  // Drafts are editable in place (per-row tiers + manual field edits); committed records
+  // are read-only history. The classification toolbar and Save button follow suit.
+  const editable = !committed;
+  if (editable) {
+    renderEditableTable($("#blocksTable"), BLOCK_COLS, data.blocks || [], "block");
+    renderEditableTable($("#factsTable"), FACT_COLS, data.facts || [], "fact");
+  } else {
+    renderTable($("#blocksTable"), BLOCK_COLS, data.blocks || []);
+    renderTable($("#factsTable"), FACT_COLS, data.facts || []);
+  }
+  const showClassBar = editable && WHOAMI.enforce;
+  $("#classBar").style.display = showClassBar ? "" : "none";
+  $("#allProtectedBtn").style.display = WHOAMI.is_protected_member ? "" : "none";
+  if (showClassBar) buildThemeControls(data.blocks || []);
+  $("#saveBtn").style.display = editable ? "" : "none";
 
   // A committed record is read-only history: hide the confirm button, relabel Discard
   // to Delete (it removes the history entry). A draft keeps the confirm/discard flow.
+  // An ingest-only (ephemeral) draft was never written to disk — the confirm label and
+  // note make clear nothing is retained here after ingestion.
+  const ephemeral = data.saved_draft === false;
   confirmBtn.style.display = committed ? "none" : "";
+  confirmBtn.textContent = ephemeral ? "Confirm & ingest — keep nothing here" : "Confirm & ingest";
   confirmBtn.disabled = (data.errors && data.errors.length) || !data.committable;
   resetBtn.textContent = committed ? "Delete from history" : "Discard";
   let note = "";
   if (committed) note = "Already ingested into Snowflake — this is a saved history record.";
   else if (data.errors && data.errors.length) note = "Fix the validation errors above before ingesting.";
   else if (!data.commit_available) note = "Commit unavailable: " + (data.commit_reason || "write connection not configured") + ".";
+  else if (ephemeral) note = "Ingest-only: not saved on this platform. On ingest it goes to Snowflake and is erased from here.";
   $("#commitNote").textContent = note;
   renderDiag(data);
   previewEl.style.display = "block";
@@ -394,14 +651,26 @@ async function structure(file) {
   currentId = null;
   $("#spinName").textContent = file.name;
   spinEl.classList.add("show");
+  const sensitivity = selectedSensitivity();
+  const ingestOnly = ingestOnlyEl.checked || sensitivity !== "internal";
   try {
     const fd = new FormData();
     fd.append("file", file);
+    // Ingest-only: tell the server not to persist a draft — data stays in memory only.
+    fd.append("save_draft", ingestOnly ? "false" : "true");
+    // Tier: the server stamps the rows and (for confidential tiers) the caller's identity.
+    fd.append("sensitivity", sensitivity);
     const res = await fetch("/api/ingest/structure", { method: "POST", body: fd });
     const data = await res.json();
     if (!data.ok) { banner("err", data.error || "Structuring failed."); return; }
-    if (data.errors && data.errors.length) banner("warn", `Structured with ${data.errors.length} validation issue(s) — saved as a draft. See below.`);
-    else banner("ok", "Structured and saved as a draft. Review the preview, then confirm to ingest.");
+    const owned = data.sensitivity === "private" ? ` — private, owned by ${data.ingested_by || "you"}`
+      : data.sensitivity === "protected" ? ` — protected, group-only (by ${data.ingested_by || "you"})`
+      : "";
+    const where = data.saved_draft === false
+      ? "held in memory only (not saved to this platform)"
+      : "saved as a draft";
+    if (data.errors && data.errors.length) banner("warn", `Structured with ${data.errors.length} validation issue(s) — ${where}${owned}. See below.`);
+    else banner("ok", `Structured and ${where}${owned}. Review the preview, then confirm to ingest.`);
     showPreview(data);
   } catch (e) {
     banner("err", "Request failed: " + e.message);
@@ -422,13 +691,79 @@ async function commit() {
     });
     const data = await res.json();
     if (!data.ok) { banner("err", data.error || "Ingest failed."); confirmBtn.disabled = false; return; }
-    banner("ok", `Ingested ${data.blocks_written} block(s) and ${data.facts_written} fact(s). ingest_id = ${data.ingest_id}`);
+    const kept = data.kept_history === false
+      ? " Nothing was kept on this platform — the data now lives only in Snowflake."
+      : "";
+    banner("ok", `Ingested ${data.blocks_written} block(s) and ${data.facts_written} fact(s). ingest_id = ${data.ingest_id}.${kept}`);
     previewEl.style.display = "none";
     currentId = null;
     loadHistory();
   } catch (e) {
     banner("err", "Request failed: " + e.message);
     confirmBtn.disabled = false;
+  }
+}
+
+// Persist post-structuring edits (per-row tiers + field changes) to the server-held
+// payload. The server re-validates and re-gates the tiers; the re-rendered response
+// reflects any new validation errors, which re-block the confirm button.
+async function saveEdits() {
+  if (!currentId) return;
+  const saveBtn = $("#saveBtn");
+  saveBtn.disabled = true;
+  hideBanner();
+  try {
+    const res = await fetch("/api/ingest/edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ingest_id: currentId,
+        blocks: collectRows($("#blocksTable"), "block"),
+        facts: collectRows($("#factsTable"), "fact"),
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) { banner("err", data.error || "Could not save edits."); return; }
+    if (data.errors && data.errors.length) banner("warn", `Saved with ${data.errors.length} validation issue(s) — fix them before ingesting.`);
+    else banner("ok", "Edits saved. Review, then confirm to ingest.");
+    showPreview({ ...data, status: "draft" });
+  } catch (e) {
+    banner("err", "Request failed: " + e.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+// Prompt-driven editor: send the user's instruction to the sub-agent, which re-tiers
+// and/or edits field values and returns the modified rows. The result is rendered for
+// review; nothing is persisted until the user clicks Save edits (which re-gates
+// server-side). Any change the user dislikes can be overridden before saving.
+async function instruct() {
+  if (!currentId || !currentPreview) return;
+  const input = $("#instructInput");
+  const instruction = input.value.trim();
+  if (!instruction) { banner("warn", "Type what you want the editor to do first."); return; }
+  const btn = $("#instructBtn");
+  btn.disabled = true;
+  hideBanner();
+  try {
+    const res = await fetch("/api/ingest/instruct", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ingest_id: currentId, instruction }),
+    });
+    const data = await res.json();
+    if (!data.ok) { banner("err", data.error || "Edit failed."); return; }
+    // Re-render onto the last payload so the confirm/commit state stays intact.
+    showPreview({ ...currentPreview, blocks: data.blocks, facts: data.facts, status: "draft" });
+    const extra = data.note ? " " + data.note : "";
+    banner(data.changed ? "ok" : "warn", data.changed
+      ? `Editor changed ${data.changed} row(s). Review, then Save edits.${extra}`
+      : `No rows matched that instruction.${extra}`);
+  } catch (e) {
+    banner("err", "Request failed: " + e.message);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -455,6 +790,29 @@ dropEl.addEventListener("drop", (e) => {
 });
 confirmBtn.addEventListener("click", commit);
 resetBtn.addEventListener("click", reset);
+$("#saveBtn").addEventListener("click", saveEdits);
+$("#instructBtn").addEventListener("click", instruct);
+$("#instructInput").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); instruct(); } });
+
+// Document-level "Set all to <tier>" buttons.
+$("#classBar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-all]");
+  if (b) applyTierToAll(b.getAttribute("data-all"));
+});
+// Theme-level selects (event-delegated, since they're rebuilt per preview).
+$("#themeControls").addEventListener("change", (e) => {
+  const sel = e.target.closest("[data-theme-set]");
+  if (sel && sel.value) applyTierToTheme(sel.getAttribute("data-theme-set"), sel.value);
+});
+// Keep a per-row tier select's color swatch in sync as the user changes it.
+$("#blocksTable").addEventListener("change", (e) => {
+  const s = e.target.closest("[data-tier]");
+  if (s) s.setAttribute("data-val", s.value);
+});
+$("#factsTable").addEventListener("change", (e) => {
+  const s = e.target.closest("[data-tier]");
+  if (s) s.setAttribute("data-val", s.value);
+});
 
 histList.addEventListener("click", (e) => {
   const del = e.target.closest('[data-act="delete"]');

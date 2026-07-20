@@ -72,6 +72,80 @@ class SnowflakeIngestConfig(SnowflakeConfig):
     )
 
 
+class AuthConfig(BaseSettings):
+    """Config for per-owner private-data enforcement, loaded from env / .env.
+
+    All defaults preserve today's behavior: with ``enforce_ownership`` false the app
+    binds no caller identity and every row stays shared (``internal``), so it runs
+    locally exactly as before. Flip ``ENFORCE_OWNERSHIP=true`` only after the Snowflake
+    migration in ``docs/sql/`` has been applied.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    # Master switch. When false, the query path binds nothing and ingest stamps
+    # everything 'internal' — identical to the pre-feature behavior.
+    enforce_ownership: bool = Field(default=False, validation_alias="ENFORCE_OWNERSHIP")
+    # Snowflake session variable the app sets to the caller's identity each request.
+    # MUST match the variable name referenced in the rap_ownership policy body.
+    caller_session_var: str = Field(default="BAYI_CALLER", validation_alias="CALLER_SESSION_VAR")
+    # Request header Azure App Service "Easy Auth" injects with the signed-in user's
+    # identity (server-trusted; never set by the browser).
+    easy_auth_header: str = Field(
+        default="X-MS-CLIENT-PRINCIPAL-NAME", validation_alias="EASY_AUTH_HEADER"
+    )
+    # Local fallback identity used when the Easy Auth header is absent (dev only).
+    dev_caller_identity: str | None = Field(
+        default=None, validation_alias="DEV_CALLER_IDENTITY"
+    )
+
+    # ── protected (group-scoped) tier ────────────────────────────────────────
+    # The single privileged Entra/M365 group whose members may mark uploads
+    # 'protected' and read protected rows (the old SG-BayI-Sensitive). Membership
+    # is decided per request from the caller's group claim, never from row data.
+    protected_group: str = Field(
+        default="SG-BayI-Sensitive", validation_alias="PROTECTED_GROUP"
+    )
+    # Request header carrying the caller's group memberships (server-trusted, from
+    # SharePoint/M365 Entra). Comma-separated group names/ids. On Azure Easy Auth
+    # the full claims arrive base64 in X-MS-CLIENT-PRINCIPAL; the deployment maps
+    # the groups claim onto this simple header. Configurable to match whatever
+    # SharePoint/M365 surfaces.
+    groups_header: str = Field(
+        default="X-MS-CLIENT-GROUPS", validation_alias="GROUPS_HEADER"
+    )
+    # Snowflake session variable the app sets to 'true'/'false' each request to tell
+    # the row-access policy whether the caller is in protected_group. MUST match the
+    # variable name referenced in the rap_ownership policy body.
+    protected_session_var: str = Field(
+        default="BAYI_PROTECTED", validation_alias="PROTECTED_SESSION_VAR"
+    )
+    # Local fallback group list (comma-separated) used when groups_header is absent
+    # (dev only). Set to include protected_group to test protected ingest/queries.
+    dev_caller_groups: str | None = Field(
+        default=None, validation_alias="DEV_CALLER_GROUPS"
+    )
+
+    @field_validator("dev_caller_identity", "dev_caller_groups", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    @property
+    def dev_group_list(self) -> list[str]:
+        """dev_caller_groups parsed into a stripped, non-empty list."""
+        if not self.dev_caller_groups:
+            return []
+        return [g.strip() for g in self.dev_caller_groups.split(",") if g.strip()]
+
+
 class AgentConfig(BaseSettings):
     """Config for the Anthropic tool-use agent loop, loaded from env / .env."""
 

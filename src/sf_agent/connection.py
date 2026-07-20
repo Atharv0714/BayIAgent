@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import snowflake.connector
@@ -14,6 +15,10 @@ logger = logging.getLogger("sf_agent.connection")
 # Snowflake error codes that mean "the session is gone, open a new one":
 # expired auth token, and session-no-longer-exists.
 _EXPIRED_SESSION_ERRNOS = {390114, 390104, 390108, 390195}
+
+# A Snowflake session-variable name is an identifier, so it can't be bound as a
+# parameter — validate it before interpolating to keep the SET statement injection-safe.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _load_private_key(path: str, passphrase: str | None) -> bytes:
@@ -44,6 +49,10 @@ class SnowflakeConnection:
     def __init__(self, config: SnowflakeConfig) -> None:
         self._config = config
         self._conn: snowflake.connector.SnowflakeConnection | None = None
+        # Session variables bound for the row-access policy (e.g. the caller's
+        # identity and protected-group membership). Remembered so they can be
+        # re-applied after a reconnect (below).
+        self._session_vars: dict[str, str | None] = {}
 
     def connect(self) -> "SnowflakeConnection":
         cfg = self._config
@@ -69,7 +78,40 @@ class SnowflakeConnection:
             client_session_keep_alive=True,
             **auth,
         )
+        # A reconnect (e.g. after session expiry) opens a fresh session with no
+        # variables, so re-apply any session variables that were bound before.
+        for var_name, value in self._session_vars.items():
+            self._apply_var(var_name, value)
         return self
+
+    def bind_session(self, variables: dict[str, str | None]) -> None:
+        """Bind (or clear) Snowflake session variables for the row-access policy.
+
+        The policy reads these variables to decide which private/protected rows the
+        current query may see, so they must be set from server-trusted values (the
+        caller's identity and group membership) — never from client input. Remembered
+        on the instance so a reconnect re-applies them. Each SET is app-authored with a
+        bound value (the name is a validated identifier), so it intentionally bypasses
+        the read-only guard. A ``None`` value UNSETs the variable.
+        """
+        for var_name in variables:
+            if not _IDENT_RE.match(var_name):
+                raise ValueError(f"invalid session variable name: {var_name!r}")
+        self._session_vars.update(variables)
+        for var_name, value in variables.items():
+            self._apply_var(var_name, value)
+
+    def _apply_var(self, var_name: str, value: str | None) -> None:
+        if self._conn is None:
+            raise RuntimeError("connection is not open; call connect() or use as context manager")
+        cur = self._conn.cursor()
+        try:
+            if value is None:
+                cur.execute(f"UNSET {var_name}")
+            else:
+                cur.execute(f"SET {var_name} = %s", (value,))
+        finally:
+            cur.close()
 
     def close(self) -> None:
         if self._conn is not None:
