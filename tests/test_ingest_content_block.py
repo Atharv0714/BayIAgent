@@ -4,6 +4,7 @@ import base64
 
 import pytest
 
+from sf_agent import ingest
 from sf_agent.ingest import IngestError, build_content_block
 
 
@@ -45,10 +46,23 @@ def test_text_decode_is_lossy_not_fatal():
     assert "caf" in blocks[0]["text"]
 
 
-def test_office_type_is_rejected_with_convert_message():
+def test_office_file_is_converted_to_a_pdf_block(monkeypatch):
+    # LibreOffice is stubbed so the test stays offline; the office branch must route the
+    # converted bytes through the PDF path (document block, application/pdf).
+    monkeypatch.setattr(ingest, "_office_to_pdf", lambda filename, raw: b"%PDF-1.7 converted")
+    blocks = build_content_block("deck.pptx", b"PK\x03\x04")
+    assert blocks[0]["type"] == "document"
+    assert blocks[0]["source"]["media_type"] == "application/pdf"
+    assert base64.b64decode(blocks[0]["source"]["data"]) == b"%PDF-1.7 converted"
+    # Provenance keeps the original office filename, not a .pdf rename.
+    assert "deck.pptx" in blocks[-1]["text"]
+
+
+def test_office_without_libreoffice_raises_convert_message(monkeypatch):
+    monkeypatch.setattr(ingest, "_find_soffice", lambda: None)
     with pytest.raises(IngestError) as exc:
-        build_content_block("deck.pptx", b"PK\x03\x04")
-    assert "convert to PDF" in str(exc.value)
+        build_content_block("report.docx", b"PK\x03\x04")
+    assert "LibreOffice is not installed" in str(exc.value)
 
 
 def test_unknown_extension_is_rejected():

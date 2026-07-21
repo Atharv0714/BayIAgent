@@ -41,27 +41,35 @@ def _structured():
         "value_num": 1800000,
         "unit": "usd",
         "raw_value": "$1.8M",
+        "source_block_index": "3",  # string that must be cast to int
     }
     return StructuredResult(manifest={"coverage_ok": True}, blocks=[block], facts=[fact])
 
 
 def test_column_counts_match_the_guide():
     # 17 guide block fields + ingest_id + sensitivity + sensitivity_category + ingested_by;
-    # 13 guide fact fields + ingest_id + sensitivity + sensitivity_category + ingested_by.
+    # 14 guide fact fields (incl. source_block_index) + the same 4 server-set columns.
     assert len(BLOCK_COLS) == 21
-    assert len(FACT_COLS) == 17
+    assert len(FACT_COLS) == 18
     # ingest_id precedes the server-set tier/ownership columns, which trail the tuple.
     assert BLOCK_COLS[-4:] == ("ingest_id", "sensitivity", "sensitivity_category", "ingested_by")
     assert FACT_COLS[-4:] == ("ingest_id", "sensitivity", "sensitivity_category", "ingested_by")
 
 
-def test_ensure_tables_runs_two_idempotent_ddls():
+def test_ensure_tables_creates_then_backfills_idempotently():
     conn = FakeConn()
     ensure_tables(conn)
-    assert len(conn.ddl) == 2
-    assert all("CREATE TABLE IF NOT EXISTS" in s for s in conn.ddl)
-    assert any(" blocks " in s for s in conn.ddl)
-    assert any(" facts " in s for s in conn.ddl)
+    creates = [s for s in conn.ddl if "CREATE TABLE IF NOT EXISTS" in s]
+    alters = [s for s in conn.ddl if "ALTER TABLE" in s]
+    # Two CREATEs (blocks + facts), each idempotent.
+    assert len(creates) == 2
+    assert any(" blocks " in s for s in creates)
+    assert any(" facts " in s for s in creates)
+    # Additive columns are backfilled with IF NOT EXISTS so old tables self-heal.
+    assert alters, "expected additive ALTER TABLE ... ADD COLUMN statements"
+    assert all("ADD COLUMN IF NOT EXISTS" in s for s in alters)
+    # The new fact->block link column is among them.
+    assert any("facts" in s and "source_block_index" in s for s in alters)
 
 
 def test_write_inserts_blocks_then_facts_with_counts():
@@ -108,6 +116,9 @@ def test_write_fact_row_carries_value_and_ingest_id():
     assert row[FACT_COLS.index("value_num")] == 1800000
     assert row[FACT_COLS.index("raw_value")] == "$1.8M"
     assert row[FACT_COLS.index("ingest_id")] == "ing123"
+    # Fact->block link ("3") coerced to a clean int for the NUMBER column.
+    sbi = row[FACT_COLS.index("source_block_index")]
+    assert sbi == 3 and isinstance(sbi, int)
 
 
 def test_write_empty_payload_is_a_noop_zero():

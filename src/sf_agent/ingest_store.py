@@ -55,6 +55,7 @@ FACT_COLS = (
     "raw_value",
     "confidence",
     "notes",
+    "source_block_index",
     "ingest_id",
     "sensitivity",
     "sensitivity_category",
@@ -63,6 +64,9 @@ FACT_COLS = (
 
 # Integer block fields cast on the way in so a JSON float ("2.0") lands as an int.
 _BLOCK_INT_FIELDS = {"block_index", "section_number", "block_order"}
+# Integer fact fields cast the same way. source_block_index points back at the block a fact
+# was extracted from (block_index within the same ingest), so it must land as a clean int.
+_FACT_INT_FIELDS = {"source_block_index"}
 # Date-typed columns; empty string -> NULL so DATE parsing doesn't choke.
 _DATE_FIELDS = {"source_modified_at", "extracted_at"}
 
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS facts (
     raw_value VARCHAR,
     confidence FLOAT,
     notes VARCHAR,
+    source_block_index NUMBER,
     ingest_id VARCHAR,
     sensitivity VARCHAR DEFAULT 'internal',
     sensitivity_category VARCHAR DEFAULT 'general',
@@ -117,10 +122,33 @@ CREATE TABLE IF NOT EXISTS facts (
 """
 
 
+# Columns added to the fixed schema after a table may already exist in a live warehouse.
+# `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so it never backfills a new
+# column — an INSERT with the current column list would then fail against the old table. Each
+# entry is applied with `ADD COLUMN IF NOT EXISTS`, so this self-heals older deployments and
+# stays a no-op once the column is present. Append here whenever the fixed schema grows.
+_ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("blocks", "sensitivity", "VARCHAR DEFAULT 'internal'"),
+    ("blocks", "sensitivity_category", "VARCHAR DEFAULT 'general'"),
+    ("blocks", "ingested_by", "VARCHAR"),
+    ("facts", "source_block_index", "NUMBER"),
+    ("facts", "sensitivity", "VARCHAR DEFAULT 'internal'"),
+    ("facts", "sensitivity_category", "VARCHAR DEFAULT 'general'"),
+    ("facts", "ingested_by", "VARCHAR"),
+)
+
+
 def ensure_tables(conn: SnowflakeConnection) -> None:
-    """Create `blocks` and `facts` if they don't already exist (idempotent)."""
+    """Create `blocks` and `facts` if absent, then backfill any additive columns (idempotent).
+
+    Fresh warehouses get the full schema from the CREATE statements; warehouses whose tables
+    predate a column get it via `ALTER TABLE ADD COLUMN IF NOT EXISTS`. Both paths are safe to
+    run on every startup.
+    """
     conn.execute_ddl(_CREATE_BLOCKS)
     conn.execute_ddl(_CREATE_FACTS)
+    for table, column, coltype in _ADDITIVE_COLUMNS:
+        conn.execute_ddl(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
 
 
 def _insert_sql(table: str, cols: tuple[str, ...]) -> str:
@@ -131,7 +159,7 @@ def _insert_sql(table: str, cols: tuple[str, ...]) -> str:
 def _coerce_block(value: Any, col: str) -> Any:
     if value is None:
         return None
-    if col in _BLOCK_INT_FIELDS:
+    if col in _BLOCK_INT_FIELDS or col in _FACT_INT_FIELDS:
         try:
             return int(value)
         except (TypeError, ValueError):

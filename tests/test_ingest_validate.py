@@ -118,6 +118,60 @@ def test_missing_manifest_errors():
     assert any("manifest" in e for e in errors)
 
 
+def _good_table(**over):
+    # A clean rectangular table: Markdown with a header separator row and a rich caption
+    # that names its columns, so the findability warnings stay quiet.
+    fields = {
+        "content_type": "table",
+        "text_content": "Quarterly revenue and gross margin by business unit (CY25).",
+        "table_markdown": "| Unit | Revenue | Margin |\n| --- | --- | --- |\n| Cloud | 1.8M | 34% |",
+    }
+    fields.update(over)
+    return _good_block(**fields)
+
+
+def test_table_missing_markdown_errors():
+    # Markdown is the canonical form the readers use, so a table without it is a hard fail.
+    _, errors = validate(_payload(blocks=[_good_table(table_markdown="")]))
+    assert any("table_markdown" in e for e in errors)
+
+
+def test_clean_table_has_no_diagnostics():
+    warnings, errors = validate(_payload(blocks=[_good_table()]))
+    assert errors == []
+    assert warnings == []
+
+
+def test_table_markdown_without_header_warns():
+    # Present but headerless Markdown is a soft signal that a split dropped the header row.
+    warnings, errors = validate(
+        _payload(blocks=[_good_table(table_markdown="Cloud 1.8M 34%\nEdge 0.9M 28%")])
+    )
+    assert errors == []
+    assert any("header" in w for w in warnings)
+
+
+def test_short_table_caption_warns():
+    warnings, _ = validate(_payload(blocks=[_good_table(text_content="Revenue")]))
+    assert any("caption" in w for w in warnings)
+
+
+def test_fact_source_block_index_non_int_errors():
+    _, errors = validate(_payload(facts=[_good_fact(source_block_index="3")]))
+    assert any("source_block_index" in e for e in errors)
+
+
+def test_fact_source_block_index_int_is_allowed():
+    _, errors = validate(_payload(facts=[_good_fact(source_block_index=3)]))
+    assert errors == []
+
+
+def test_fact_source_block_index_bool_is_rejected():
+    # bool is an int subclass; a stray True must not pass as a block reference.
+    _, errors = validate(_payload(facts=[_good_fact(source_block_index=True)]))
+    assert any("source_block_index" in e for e in errors)
+
+
 def test_structured_result_committable_property():
     ok = StructuredResult(manifest={"coverage_ok": True}, errors=[])
     assert ok.committable is True

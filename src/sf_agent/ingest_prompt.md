@@ -60,8 +60,8 @@ Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `b
 | block_status | enum | filled \| partial \| placeholder |
 | image_class | string | org_chart\|chart\|heat_map\|diagram\|logo_collage, else "" |
 | text_content | string | NEVER empty. Prose, or a caption for a table/image block |
-| table_html | string | HTML when content_type=table, else "" |
-| table_markdown | string | Markdown when content_type=table, else "" |
+| table_markdown | string | ALWAYS fill for content_type=table (canonical form the readers use), else "" |
+| table_html | string | ONLY when Markdown can't hold the structure (merged/spanning cells, multi-row/hierarchical headers, nested tables); else "". Note why in `notes`/caption |
 | image_ocr_text | string | OCR/vision text for non-decorative images, else "" |
 | owner | string | block-level owner/author if the source names one, else "" |
 | source_parser | string | pptx\|pdf\|pdf_vision\|pptx_chart\|docx\|xlsx\|ocr\|text |
@@ -69,7 +69,7 @@ Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `b
 | source_modified_at | date/null | source last-modified |
 | extracted_at | date | extraction date |
 
-## Fixed schema: facts (13 fields)
+## Fixed schema: facts (14 fields)
 
 | field | type | rule |
 |-------|------|------|
@@ -86,6 +86,7 @@ Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `b
 | raw_value | string | verbatim source string; ALWAYS set, so the original survives a bad cast |
 | confidence | number | 0-1; lower when unit/value ambiguous |
 | notes | string | flags: implausible, unit_ambiguous, conflict, floor_value, from_fill_color, from_chart_xml |
+| source_block_index | int | the block_index of the block this fact came from; links a number back to its source table |
 
 ## Rules
 
@@ -93,6 +94,8 @@ Universal:
 - snake_case, ASCII in all names/values that become identifiers.
 - null means null. Never "N/A", "-", "", or 0 as a stand-in. A real measured 0 is a value.
 - Provenance on every row: source_file, locator, extracted_at, source_parser.
+- Every fact records source_block_index = the block_index of the block it was extracted from,
+  so a computed number can surface its source table and vice versa.
 - Never invent. Absent -> null. Placeholder ($XM, ____%, empty template rows) -> block_status=placeholder in blocks; EXCLUDED from facts so it can't pollute SUM/COUNT.
 - Resolve entity aliases ("Kamesh G." == "Kamesh Gadepally") to one entity_name.
 - Prefer encoded signals over rendered text when they disagree (fill color beats an inconsistent emoji; note from_fill_color).
@@ -105,7 +108,16 @@ Numeric fidelity (this is what makes facts computable and correct):
 
 Retrieval (blocks):
 - Keep chunks coherent: do not atomize prose or split multi-value cells.
-- Self-contained: fold the section label into its block; caption every table in text_content.
+- Self-contained: fold the section label into its block.
+- Tables serialize as Markdown by default (`table_markdown`, always set). Add `table_html`
+  ONLY when Markdown would lose structure (merged/spanning cells, multi-row/hierarchical
+  headers, nested tables); for a plain rectangular grid leave `table_html` empty. When you
+  do emit HTML, say why in a short note (the Markdown is then a lossy view of that table).
+- Caption every table in text_content so it's findable even though its body is numbers. The
+  caption MUST state: the subject in plain language; the column/header names spelled out; the
+  entities and the period/time coverage; one sentence of what the table shows.
+- Never split a table across blocks. If a table spans pages/slides, stitch it into ONE block
+  and repeat the header on each continuation — no chunk may carry headerless table rows.
 - Preserve list structure as bullet_list; do not collapse into narrative.
 
 Visual content (do not leave images as stubs):
@@ -116,7 +128,7 @@ Visual content (do not leave images as stubs):
 ## Format handling (any type)
 
 - pptx: fake-table trap. Decks are often grids of separate text boxes (no real table objects). Reconstruct grids by clustering boxes into horizontal bands and normalizing each to a fixed column count; or extract from the PDF render if available. Pull chart XML and image text.
-- pdf: ground truth for decks. Stitch cross-page tables into one. Skip narrative unless it states a fact.
+- pdf: ground truth for decks. Cross-page tables follow the universal stitch rule (one block, repeated header). Skip narrative unless it states a fact.
 - docx: tables -> rows; "Field: value" blocks -> one record; ignore commentary; capture section owners.
 - xlsx/csv: find the real header row; unpivot period columns; drop Total/subtotal rows; forward-fill merged cells; each numeric cell -> a fact.
 - image: OCR to text; if it's a chart/table screenshot, reconstruct it; else one image_text block.
@@ -134,7 +146,8 @@ Visual content (do not leave images as stubs):
 
 - Required block fields non-null: block_index, section_number, section_title, section_theme, block_order, content_type, block_status, text_content.
 - content_type, block_status, unit all inside their closed sets.
-- Every fact: value_num is a number or null (never a string); unit set; raw_value non-empty.
+- Every content_type=table block has a non-empty table_markdown (hard gate); its caption names the columns; a stitched table keeps its header row.
+- Every fact: value_num is a number or null (never a string); unit set; raw_value non-empty; source_block_index is an int (or null) pointing at its source block.
 - Placeholders excluded from facts; present in blocks with block_status=placeholder.
 - Coverage: mapped_units + dropped_units == total_source_units. Set manifest.coverage_ok accordingly.
 - No fabricated values. If confidence < 0.5 for a fact, keep raw_value, null value_num, and add a warning.

@@ -7,13 +7,18 @@ Snowflake lives in `ingest_store.py` and runs only after the user confirms.
 
 Native multimodal input only (no parsing deps): PDFs and images go to Claude as
 `document` / `image` content blocks; text-family files as decoded text. Office
-formats are rejected with a convert-to-PDF message.
+formats are converted to PDF on the server via LibreOffice (headless) and then take
+the PDF path; if LibreOffice is absent they fall back to a convert-to-PDF message.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -34,8 +39,8 @@ _GUIDE = (Path(__file__).parent / "ingest_prompt.md").read_text("utf-8")
 INGEST_SYSTEM = [{"type": "text", "text": _GUIDE, "cache_control": {"type": "ephemeral"}}]
 
 # Extension -> how the bytes reach Claude. PDFs/images use native content blocks;
-# text-family files are decoded inline. Office formats are intentionally absent so
-# they hit the convert-to-PDF rejection below.
+# text-family files are decoded inline. Office formats are converted to PDF first (see
+# _office_to_pdf) and then follow the PDF path.
 _PDF_EXTS = {".pdf"}
 _IMAGE_MEDIA = {
     ".png": "image/png",
@@ -45,6 +50,12 @@ _IMAGE_MEDIA = {
     ".webp": "image/webp",
 }
 _TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".html", ".htm", ".json", ".eml"}
+# Word/Excel/PowerPoint (and their OpenDocument/RTF cousins): the model can't read these
+# binaries natively, so LibreOffice renders them to PDF, preserving tables/layout/images.
+_OFFICE_EXTS = {
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".odt", ".ods", ".odp", ".rtf",
+}
 
 # Closed vocabularies from the guide — the app rejects any value outside these.
 _CONTENT_TYPES = {
@@ -69,6 +80,12 @@ SENSITIVITIES = ("internal", "private", "protected")
 # Fact fields the UI may edit that must be re-typed after a manual edit (the browser
 # sends everything as strings). Kept next to the block int-fields the loader coerces.
 _FACT_NUMBER_FIELDS = {"value_num", "confidence"}
+# Fact int fields the UI may edit (source_block_index links a fact to its source block).
+_FACT_INT_FIELDS = {"source_block_index"}
+
+# A table caption shorter than this can't carry a subject + column names, so it won't embed
+# well for retrieval — surfaced as a warning, not a hard failure.
+_MIN_TABLE_CAPTION = 15
 
 # Block fields that must be present and non-null (guide validation gates).
 _REQUIRED_BLOCK_FIELDS = (
@@ -108,12 +125,74 @@ class StructuredResult(BaseModel):
         return not self.errors and bool(self.manifest.get("coverage_ok"))
 
 
+def _find_soffice() -> str | None:
+    """Locate the LibreOffice binary: an explicit SOFFICE_BIN override, then PATH, then
+    the standard macOS app bundle. Returns None when LibreOffice isn't installed."""
+    override = os.environ.get("SOFFICE_BIN")
+    if override:
+        return override
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    mac_app = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    return mac_app if Path(mac_app).exists() else None
+
+
+def _office_to_pdf(filename: str, raw: bytes) -> bytes:
+    """Render an Office document to PDF bytes via headless LibreOffice, so it can take the
+    native PDF path. A per-call UserInstallation profile keeps concurrent conversions (and
+    a desktop LibreOffice the user may have open) from clashing. Raises IngestError with an
+    actionable message when LibreOffice is missing or the conversion fails."""
+    soffice = _find_soffice()
+    if soffice is None:
+        raise IngestError(
+            "This server can't convert Office files (LibreOffice is not installed) — "
+            "convert to PDF and retry."
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / Path(filename).name
+        src.write_bytes(raw)
+        profile = Path(tmp) / "profile"
+        try:
+            proc = subprocess.run(
+                [
+                    soffice,
+                    f"-env:UserInstallation=file://{profile}",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    tmp,
+                    str(src),
+                ],
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise IngestError("Office-to-PDF conversion timed out.") from e
+        except OSError as e:
+            raise IngestError(f"Could not run LibreOffice: {e}") from e
+
+        pdf_path = src.with_suffix(".pdf")
+        if proc.returncode != 0 or not pdf_path.exists():
+            detail = proc.stderr.decode("utf-8", "replace").strip()[:200] or "unknown error"
+            raise IngestError(f"Office-to-PDF conversion failed: {detail}")
+        return pdf_path.read_bytes()
+
+
 def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
     """Turn one uploaded file into Anthropic content blocks for the structuring call.
 
-    Raises IngestError for Office/unknown types so the caller can return a clean 415.
+    Office files are first converted to PDF (via LibreOffice) and then take the PDF path.
+    Raises IngestError for unknown types, or when Office conversion isn't possible, so the
+    caller can return a clean 415/422.
     """
     ext = Path(filename).suffix.lower()
+    if ext in _OFFICE_EXTS:
+        # Convert in place: the model still sees the original filename for provenance.
+        raw = _office_to_pdf(filename, raw)
+        ext = ".pdf"
     instruction = {
         "type": "text",
         "text": (
@@ -148,6 +227,21 @@ def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
         )
 
     return [source_block, instruction]
+
+
+def _has_markdown_header(md: str) -> bool:
+    """True if the Markdown table has a header separator row (e.g. ``| --- | --- |``).
+
+    A pipe table's second line is a divider of dashes/colons/pipes; its presence is the
+    cheapest signal that the header survived a page/slide split. Heuristic, not a guarantee.
+    """
+    for line in md.splitlines():
+        stripped = line.strip().strip("|").strip()
+        if not stripped or "-" not in stripped:
+            continue
+        if all(ch in "-: |" for ch in stripped):
+            return True
+    return False
 
 
 def validate(data: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -188,6 +282,23 @@ def validate(data: dict[str, Any]) -> tuple[list[str], list[str]]:
         bs = block.get("block_status")
         if bs is not None and bs not in _BLOCK_STATUSES:
             errors.append(f"block[{i}] block_status '{bs}' not in the closed set.")
+        # Table-specific gates: Markdown is the canonical serialization the retrieval and
+        # query lanes read, so it is mandatory (hard gate). The caption and header checks are
+        # heuristic quality signals surfaced as warnings — validate() only sees the finished
+        # JSON, so it can't prove a table was split correctly, only nudge on findability.
+        if ct == "table":
+            md = block.get("table_markdown")
+            if not isinstance(md, str) or not md.strip():
+                errors.append(f"block[{i}] table block is missing table_markdown.")
+            elif not _has_markdown_header(md):
+                warnings.append(
+                    f"block[{i}] table_markdown has no header row — a split may have dropped it."
+                )
+            caption = block.get("text_content")
+            if isinstance(caption, str) and len(caption.strip()) < _MIN_TABLE_CAPTION:
+                warnings.append(
+                    f"block[{i}] table caption is very short — name its columns so it's findable."
+                )
 
     for i, fact in enumerate(facts):
         if not isinstance(fact, dict):
@@ -202,6 +313,12 @@ def validate(data: dict[str, Any]) -> tuple[list[str], list[str]]:
         raw_value = fact.get("raw_value")
         if not isinstance(raw_value, str) or not raw_value.strip():
             errors.append(f"fact[{i}] raw_value must be non-empty.")
+        # Link back to the source block (block_index within the same ingest). Optional for
+        # legacy/edited rows, so only type-check when present; the prompt is what makes the
+        # model emit it. bool is an int subclass in Python — exclude it explicitly.
+        sbi = fact.get("source_block_index")
+        if not (sbi is None or (isinstance(sbi, int) and not isinstance(sbi, bool))):
+            errors.append(f"fact[{i}] source_block_index must be an integer or null, got {sbi!r}.")
 
     # Carry the model's own manifest warnings through to the UI.
     for w in manifest.get("warnings", []) or []:
@@ -268,7 +385,7 @@ def coerce_for_validation(
     out_facts: list[dict[str, Any]] = []
     for f in facts:
         rec = dict(f)
-        for k in _FACT_NUMBER_FIELDS:
+        for k in _FACT_NUMBER_FIELDS | _FACT_INT_FIELDS:
             if k in rec:
                 rec[k] = _to_number(rec[k])
         out_facts.append(rec)

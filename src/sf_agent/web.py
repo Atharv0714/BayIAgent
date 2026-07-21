@@ -15,6 +15,7 @@ then open http://127.0.0.1:8000.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -138,6 +139,14 @@ async def lifespan(app: FastAPI):
 
     STATE.connection = SnowflakeConnection(sf_config).connect()
     logger.info("web: snowflake connection opened")
+
+    # Some launch environments export ANTHROPIC_API_KEY as an empty string (e.g. a login
+    # shell or parent process that declares the var without a value). pydantic-settings
+    # gives real env vars priority over .env, so an empty export silently shadows the real
+    # key in .env — the app then starts fine but every Claude call fails auth at request
+    # time. Drop the empty shadow so .env stays authoritative for local runs.
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip() == "":
+        os.environ.pop("ANTHROPIC_API_KEY", None)
 
     try:
         agent_config = AgentConfig()  # type: ignore[call-arg]
