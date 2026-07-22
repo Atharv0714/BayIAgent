@@ -231,6 +231,13 @@ def _row_tuple(
     return tuple(values)
 
 
+def category_for_tier(tier: str) -> str:
+    """Human-facing label mirroring the enforcement enum: the default `internal` tier
+    reads as "general"; the confidential tiers keep their own name. Single source of
+    truth so the write path and the editor subagent derive the same category."""
+    return "general" if tier == "internal" else tier
+
+
 def _injected_for(rec: dict[str, Any], ingest_id: str, default_tier: str, ingested_by: str | None):
     """Per-row server-set columns: honor the row's own (server-vetted) `sensitivity`
     when present, else fall back to `default_tier`. `ingested_by` is stamped only on
@@ -241,9 +248,7 @@ def _injected_for(rec: dict[str, Any], ingest_id: str, default_tier: str, ingest
     return {
         "ingest_id": ingest_id,
         "sensitivity": tier,
-        # Human-facing label mirroring the enforcement enum: the default `internal`
-        # tier reads as "general"; the confidential tiers keep their own name.
-        "sensitivity_category": "general" if tier == "internal" else tier,
+        "sensitivity_category": category_for_tier(tier),
         "ingested_by": ingested_by if tier != "internal" else None,
     }
 

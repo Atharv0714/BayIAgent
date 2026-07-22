@@ -47,7 +47,12 @@ from sf_agent.ingest import (
     tier_requirements,
     validate,
 )
-from sf_agent.ingest_store import ensure_tables, read_registry, write as ingest_write
+from sf_agent.ingest_store import (
+    category_for_tier,
+    ensure_tables,
+    read_registry,
+    write as ingest_write,
+)
 from sf_agent.tools.cortex_analyst import CortexAnalystTool
 from sf_agent.tools.run_sql import RunSqlTool
 
@@ -524,25 +529,33 @@ def _row_catalog(blocks: list[dict[str, Any]], facts: list[dict[str, Any]]) -> s
 
 def _apply_patches(
     rows: list[dict[str, Any]], patches: Any, key: str, is_member: bool
-) -> int:
+) -> list[dict[str, Any]]:
     """Apply the model's per-row patches onto `rows` in place, matched by `key`
     (block_index / fact_id). A `sensitivity` the caller can't author is downgraded
-    (protected -> private for a non-member) or dropped if not a real tier. Other keys are
-    applied verbatim — commit re-derives the security columns, so a stray field is inert.
-    Returns how many rows changed."""
+    (protected -> private for a non-member) or dropped if not a real tier. `reason` is a
+    model-supplied explanation surfaced to the user, never written onto the row. Other
+    fields are applied verbatim — commit re-derives the security columns, so a stray field
+    is inert.
+
+    Returns one change-record per row actually changed, each carrying the row's key, a
+    content snippet, the resulting tier + human-facing category, whether the tier moved,
+    and the model's reason — so the UI can show, right under the edit, exactly which rows
+    were reclassified and why."""
     if not isinstance(patches, list):
-        return 0
+        return []
     index = {str(r.get(key)): r for r in rows if r.get(key) is not None}
-    changed = 0
+    changes: list[dict[str, Any]] = []
     for patch in patches:
         if not isinstance(patch, dict) or patch.get(key) is None:
             continue
         target = index.get(str(patch[key]))
         if target is None:
             continue
+        reason = str(patch.get("reason") or "").strip()
+        before_tier = target.get("sensitivity")
         row_changed = False
         for field, val in patch.items():
-            if field == key:
+            if field in (key, "reason"):
                 continue
             if field == "sensitivity":
                 if val not in SENSITIVITIES:
@@ -551,8 +564,36 @@ def _apply_patches(
                     val = "private"
             target[field] = val
             row_changed = True
-        changed += 1 if row_changed else 0
-    return changed
+        if not row_changed:
+            continue
+        after_tier = target.get("sensitivity")
+        snippet = (
+            str(target.get("text_content") or "").strip()[:160]
+            if key == "block_index"
+            else _fact_snippet(target)
+        )
+        changes.append(
+            {
+                key: target.get(key),
+                "snippet": snippet,
+                "sensitivity": after_tier,
+                "sensitivity_category": (
+                    category_for_tier(after_tier) if after_tier in SENSITIVITIES else after_tier
+                ),
+                "tier_changed": before_tier != after_tier,
+                "reason": reason,
+            }
+        )
+    return changes
+
+
+def _fact_snippet(fact: dict[str, Any]) -> str:
+    """A short human label for a fact row in the changes list."""
+    val = fact.get("raw_value") or fact.get("value_num") or fact.get("value_text") or ""
+    entity = str(fact.get("entity_name") or "").strip()
+    attribute = str(fact.get("attribute") or "").strip()
+    label = " ".join(p for p in (entity, attribute) if p) or "fact"
+    return f"{label}: {val}".strip()[:160]
 
 
 @app.post("/api/ingest/instruct")
@@ -587,9 +628,12 @@ def ingest_instruct(req: InstructRequest, request: Request) -> JSONResponse:
         "protected = restricted to a privileged internal group (e.g. financials, margins, "
         "compensation, legal, M&A, board material).\n"
         f"Only assign tiers from: {allowed}.\n"
-        'Return ONLY JSON of the form {"blocks":[{"block_index":<int>,"sensitivity":"<tier>"}],'
-        '"facts":[{"fact_id":"<id>","sensitivity":"<tier>"}]}. Include only the rows you '
-        "change and only the fields you change; to correct a value, include that field too.\n\n"
+        'Return ONLY JSON of the form {"blocks":[{"block_index":<int>,"sensitivity":"<tier>",'
+        '"reason":"<why>"}],"facts":[{"fact_id":"<id>","sensitivity":"<tier>","reason":"<why>"}]}. '
+        "Include only the rows you change and only the fields you change; to correct a value, "
+        "include that field too. For EVERY changed row also include a short `reason` (one "
+        "sentence) that quotes the specific line or phrase in that row that justifies the new "
+        "tier, so the user can see exactly why you reclassified it.\n\n"
         f"USER INSTRUCTION:\n{instruction}\n\n"
         f"{_row_catalog(blocks, facts)}"
     )
@@ -612,12 +656,20 @@ def ingest_instruct(req: InstructRequest, request: Request) -> JSONResponse:
     if not isinstance(raw, dict):
         raw = {}
 
-    changed = _apply_patches(blocks, raw.get("blocks"), "block_index", is_member)
-    changed += _apply_patches(facts, raw.get("facts"), "fact_id", is_member)
+    block_changes = _apply_patches(blocks, raw.get("blocks"), "block_index", is_member)
+    fact_changes = _apply_patches(facts, raw.get("facts"), "fact_id", is_member)
+    changed = len(block_changes) + len(fact_changes)
 
     note = None if is_member else "Protected is unavailable to you; any such rows became Private."
     return JSONResponse(
-        {"ok": True, "blocks": blocks, "facts": facts, "changed": changed, "note": note}
+        {
+            "ok": True,
+            "blocks": blocks,
+            "facts": facts,
+            "changed": changed,
+            "changes": {"blocks": block_changes, "facts": fact_changes},
+            "note": note,
+        }
     )
 
 

@@ -202,6 +202,26 @@
   }
   table.edit td { max-width: 340px; white-space: normal; }
   table.edit textarea { min-width: 200px; }
+  .instruct-changes {
+    border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px;
+  }
+  .instruct-changes .ic-head {
+    font-family: var(--display); font-weight: 700; font-size: 12px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px;
+  }
+  .instruct-changes .ic-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .instruct-changes .ic-list li {
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: #fafafa;
+  }
+  .instruct-changes .ic-cat {
+    display: inline-block; font-family: var(--display); font-weight: 700; font-size: 11px;
+    padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border); margin-right: 6px;
+  }
+  .instruct-changes .ic-private { border-color: var(--accent); color: var(--accent); }
+  .instruct-changes .ic-protected { border-color: var(--bo-deep); color: var(--bo-deep); }
+  .instruct-changes .ic-ref { font-size: 11px; color: var(--muted); }
+  .instruct-changes .ic-snip { font-size: 12px; margin-top: 3px; color: var(--text); }
+  .instruct-changes .ic-reason { font-size: 12px; margin-top: 2px; color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -287,6 +307,7 @@
         <input type="text" id="instructInput" placeholder="e.g. anything about margins made off consultants → protected" />
         <button type="button" id="instructBtn" class="primary">Apply</button>
       </div>
+      <div id="instructChanges" class="instruct-changes" style="flex-basis:100%;display:none"></div>
     </div>
 
     <section class="card">
@@ -602,6 +623,9 @@ async function deleteRecord(id) {
 function showPreview(data) {
   currentId = data.ingest_id;
   currentPreview = data;
+  // Clear any prior editor-changes panel; instruct() re-populates it after this call.
+  const icEl = $("#instructChanges");
+  if (icEl) { icEl.style.display = "none"; icEl.innerHTML = ""; }
   const committed = data.status === "committed";
   renderManifest(data.manifest || {});
   renderList($("#warnCard"), $("#warnList"), data.warnings);
@@ -756,6 +780,7 @@ async function instruct() {
     if (!data.ok) { banner("err", data.error || "Edit failed."); return; }
     // Re-render onto the last payload so the confirm/commit state stays intact.
     showPreview({ ...currentPreview, blocks: data.blocks, facts: data.facts, status: "draft" });
+    renderInstructChanges(data.changes);
     const extra = data.note ? " " + data.note : "";
     banner(data.changed ? "ok" : "warn", data.changed
       ? `Editor changed ${data.changed} row(s). Review, then Save edits.${extra}`
@@ -765,6 +790,33 @@ async function instruct() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// Render, right under the editor box, the rows the sub-agent reclassified: each row's
+// resulting category + the specific line/short reason it gave, so the user can audit
+// every tier change before saving.
+function renderInstructChanges(changes) {
+  const el = $("#instructChanges");
+  if (!el) return;
+  const blocks = (changes && changes.blocks) || [];
+  const facts = (changes && changes.facts) || [];
+  if (!blocks.length && !facts.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+  const rowHtml = (c, label) => {
+    const cat = escText(c.sensitivity_category || c.sensitivity || "");
+    const moved = c.tier_changed ? "" : " (unchanged tier)";
+    const snip = escText(c.snippet || "");
+    const reason = c.reason ? escText(c.reason) : "—";
+    return `<li><span class="ic-cat ic-${escText(c.sensitivity || "")}">${cat}${moved}</span>`
+      + `<span class="ic-ref">${label}</span>`
+      + `<div class="ic-snip">${snip}</div>`
+      + `<div class="ic-reason">${reason}</div></li>`;
+  };
+  const parts = ["<div class=\"ic-head\">Reclassified rows &amp; why</div><ul class=\"ic-list\">"];
+  for (const c of blocks) parts.push(rowHtml(c, "block " + escText(c.block_index)));
+  for (const c of facts) parts.push(rowHtml(c, "fact " + escText(c.fact_id)));
+  parts.push("</ul>");
+  el.innerHTML = parts.join("");
+  el.style.display = "";
 }
 
 // "Discard" (draft) / "Delete from history" (committed) on an open preview removes the

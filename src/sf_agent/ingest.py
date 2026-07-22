@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +433,67 @@ def _registry_block(registry: dict[str, list[str]] | None) -> dict[str, Any] | N
     return {"type": "text", "text": "\n".join(lines)}
 
 
+# Document-level provenance the app stamps itself instead of having the model repeat it on
+# every row. These four are identical for a whole upload, so emitting them per block/fact was
+# pure output-token waste — on a fine-grained (sentence-per-block) doc they were ~40% of the
+# blocks' output. The app is also the *authoritative* source: it knows the real filename, how it
+# delivered the bytes to the model, and the run date — no model typo can corrupt provenance.
+_OPTIONAL_BLOCK_STRINGS = (
+    "image_class",
+    "table_markdown",
+    "table_html",
+    "image_ocr_text",
+    "owner",
+)
+
+
+def _source_parser_for(filename: str) -> str:
+    """How the app fed this file to the model (its provenance 'parser'). Office and PDF both
+    reach the model as rendered PDF pages (vision); images as vision/OCR; text-family inline."""
+    ext = Path(filename).suffix.lower()
+    if ext in _OFFICE_EXTS or ext in _PDF_EXTS:
+        return "pdf_vision"
+    if ext in _IMAGE_MEDIA:
+        return "ocr"
+    return "text"
+
+
+def _apply_document_metadata(
+    manifest: dict[str, Any],
+    blocks: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    filename: str,
+) -> None:
+    """Stamp document-level provenance onto every row in place, so the model no longer has to.
+
+    `source_file`, `source_parser`, and `extracted_at` are app-authoritative (the app knows the
+    real name, transport, and run date) and overwrite any value the model emitted.
+    `source_modified_at` is the document's own last-modified — the model reads it from the file
+    metadata and reports it once in the manifest, so it's filled from there onto rows that omit
+    it (a per-row value still wins). Optional string fields default to "" so a lean model output
+    (which omits empty fields) still hands the preview table and the loader a stable shape.
+    """
+    source_file = filename or str(manifest.get("source_file") or "")
+    source_parser = _source_parser_for(filename)
+    extracted_at = date.today().isoformat()
+    modified_at = manifest.get("source_modified_at")
+
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        b["source_file"] = source_file
+        b["source_parser"] = source_parser
+        b["extracted_at"] = extracted_at
+        if not b.get("source_modified_at") and modified_at:
+            b["source_modified_at"] = modified_at
+        for f in _OPTIONAL_BLOCK_STRINGS:
+            if not b.get(f):
+                b[f] = ""
+    for fact in facts:
+        if isinstance(fact, dict):
+            fact["source_file"] = source_file
+
+
 def structure_upload(
     client: anthropic.Anthropic,
     config: AgentConfig,
@@ -484,11 +546,18 @@ def structure_upload(
     except Exception as e:  # noqa: BLE001 — surface any parse failure as an ingest error
         raise IngestError(f"Model did not return usable JSON: {e}") from e
 
-    warnings, errors = validate(data)
+    manifest = data.get("manifest") or {}
+    blocks = data.get("blocks") or []
+    facts = data.get("facts") or []
+    # Back-fill the provenance the model no longer repeats per row, and normalize optional
+    # empties, BEFORE validating — so the gates and the loader see complete, stable rows.
+    _apply_document_metadata(manifest, blocks, facts, filename)
+
+    warnings, errors = validate({"manifest": manifest, "blocks": blocks, "facts": facts})
     return StructuredResult(
-        manifest=data.get("manifest") or {},
-        blocks=data.get("blocks") or [],
-        facts=data.get("facts") or [],
+        manifest=manifest,
+        blocks=blocks,
+        facts=facts,
         warnings=warnings,
         errors=errors,
         elapsed_ms=elapsed_ms,

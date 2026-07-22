@@ -47,7 +47,11 @@ Because these schemas are fixed, the app's tables and file format are created on
 
 Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `block_index` (0-based within this document) and `block_order` (within its section); the app computes global `block_id`. For `facts`, compute `fact_id` = sha1(source_file + source_locator + entity_name + attribute + period).
 
-## Fixed schema: blocks (17 fields)
+## Fixed schema: blocks
+
+Emit only the fields below per block. Keep every block LEAN: omit any optional field whose value
+would be empty (`""`/none) rather than emitting a blank — the app defaults it. This matters: a
+blank field repeated across hundreds of fine-grained blocks is wasted output.
 
 | field | type | rule |
 |-------|------|------|
@@ -58,23 +62,25 @@ Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `b
 | block_order | int | order within the section |
 | content_type | enum | title \| narrative \| bullet_list \| statistic \| table \| image_text \| section_divider. CLOSED set, no new values |
 | block_status | enum | filled \| partial \| placeholder |
-| image_class | string | org_chart\|chart\|heat_map\|diagram\|logo_collage, else "" |
 | text_content | string | NEVER empty. Prose, or a caption for a table/image block |
-| table_markdown | string | ALWAYS fill for content_type=table (canonical form the readers use), else "" |
-| table_html | string | ONLY when Markdown can't hold the structure (merged/spanning cells, multi-row/hierarchical headers, nested tables); else "". Note why in `notes`/caption |
-| image_ocr_text | string | OCR/vision text for non-decorative images, else "" |
-| owner | string | block-level owner/author if the source names one, else "" |
-| source_parser | string | pptx\|pdf\|pdf_vision\|pptx_chart\|docx\|xlsx\|ocr\|text |
-| source_file | string | original filename |
-| source_modified_at | date/null | source last-modified |
-| extracted_at | date | extraction date |
+| image_class | string | org_chart\|chart\|heat_map\|diagram\|logo_collage. OMIT when not an image |
+| table_markdown | string | REQUIRED for content_type=table (canonical form the readers use); OMIT otherwise |
+| table_html | string | ONLY when Markdown can't hold the structure (merged/spanning cells, multi-row/hierarchical headers, nested tables). OMIT otherwise. Note why in `notes`/caption |
+| image_ocr_text | string | OCR/vision text for non-decorative images. OMIT when empty |
+| owner | string | block-level owner/author if the source names one. OMIT when none |
 
-## Fixed schema: facts (14 fields)
+Provenance columns `source_file`, `source_parser`, and `extracted_at` are **app-stamped — do
+NOT emit them on any block**; the app fills them (it owns the authoritative filename, transport,
+and run date). Report the document's `source_modified_at` **once in the manifest**, not per block.
+
+## Fixed schema: facts
+
+`source_file` is **app-stamped — do NOT emit it on any fact** (use the given filename only to
+compute the `fact_id` hash). Omit any other optional field that would be empty.
 
 | field | type | rule |
 |-------|------|------|
 | fact_id | string | sha1(source_file+source_locator+entity_name+attribute+period); idempotent |
-| source_file | string | original filename |
 | source_locator | string | slide/page/sheet+cell |
 | entity_type | string | open but snake_case; REUSE existing values (see registry) |
 | entity_name | string | the entity the fact is about; resolve aliases to one canonical name |
@@ -93,7 +99,8 @@ Emit natural-key fields; let the app assign surrogate ids. For `blocks`, emit `b
 Universal:
 - snake_case, ASCII in all names/values that become identifiers.
 - null means null. Never "N/A", "-", "", or 0 as a stand-in. A real measured 0 is a value.
-- Provenance on every row: source_file, locator, extracted_at, source_parser.
+- Document-level provenance (source_file, source_parser, extracted_at) is app-stamped — never
+  emit it per row. A fact still carries its own source_locator (its slide/page/cell).
 - Every fact records source_block_index = the block_index of the block it was extracted from,
   so a computed number can surface its source table and vice versa.
 - Never invent. Absent -> null. Placeholder ($XM, ____%, empty template rows) -> block_status=placeholder in blocks; EXCLUDED from facts so it can't pollute SUM/COUNT.
