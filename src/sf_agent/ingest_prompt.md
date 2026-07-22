@@ -11,7 +11,7 @@ Hard boundaries:
 
 Every upload produces rows for one or both fixed tables, plus a manifest.
 
-- `blocks` = readable content for retrieval (RAG). Fine-grained: one row per SINGLE idea — one sentence of prose, or one bullet/list item. Tables and images are the exception (one row per whole table/image). Prose, tables-as-markdown, image text.
+- `blocks` = readable content for retrieval (RAG). Fine-grained: one row per SINGLE idea — one sentence of prose. Short bullets stay grouped: a list of one-sentence (or shorter) items stays in ONE block; only a bullet longer than one sentence becomes its own block. Tables and images are the exception (one row per whole table/image). Prose, tables-as-markdown, image text.
 - `facts` = computable data for analytics (SQL). One row per atomic fact (EAV/long form). Any number from any document lands here so it can be SUMmed/filtered/joined.
 
 Because these schemas are fixed, the app's tables and file format are created once and never change per upload. That is what makes ingestion direct.
@@ -115,10 +115,12 @@ Numeric fidelity (this is what makes facts computable and correct):
 
 Retrieval (blocks):
 - Granularity: emit ONE idea per block. Split narrative prose into one sentence per block
-  (content_type=narrative); split a bullet/numbered list into one item per block. This finer
-  grain sharpens retrieval — a query matches the exact sentence, not a wall of text. Assign
-  block_order sequentially to the pieces within their section. Do NOT split mid-sentence, do
-  NOT split a multi-value table cell, and do NOT merge unrelated sentences back together.
+  (content_type=narrative). For bullet/numbered lists, do NOT over-fragment: keep a run of
+  short bullets (each one sentence or shorter) together in a SINGLE bullet_list block; break a
+  bullet out into its own block only when that bullet is itself longer than one sentence. This
+  finer grain sharpens retrieval — a query matches the exact sentence, not a wall of text.
+  Assign block_order sequentially to the pieces within their section. Do NOT split mid-sentence,
+  do NOT split a multi-value table cell, and do NOT merge unrelated sentences back together.
 - Exception — keep whole: a table stays in ONE block (with its caption + markdown, see below)
   and an image stays in ONE block; never atomize these into per-row/per-line blocks.
 - Self-contained: every block carries its section_title/section_theme, so a one-sentence block
@@ -132,9 +134,11 @@ Retrieval (blocks):
   entities and the period/time coverage; one sentence of what the table shows.
 - Never split a table across blocks. If a table spans pages/slides, stitch it into ONE block
   and repeat the header on each continuation — no chunk may carry headerless table rows.
-- Preserve list structure as bullet_list, and emit EACH item as its own block (one bullet =
-  one block, content_type=bullet_list). Do not collapse a list into narrative, and do not pack
-  a whole list into a single block.
+- Preserve list structure as bullet_list. Keep short bullets grouped: a list whose items are
+  each one sentence or shorter stays in ONE bullet_list block, one item per line. Only a bullet
+  that runs longer than one sentence gets its own block (content_type=bullet_list) — split that
+  multi-sentence bullet from its neighbors while keeping the short ones together. Do not collapse
+  a list into narrative prose.
 
 Visual content (do not leave images as stubs):
 - OCR/vision every non-decorative image into image_ocr_text.
