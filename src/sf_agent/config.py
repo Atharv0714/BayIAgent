@@ -165,8 +165,12 @@ class AgentConfig(BaseSettings):
     web_search_max_uses: int = Field(default=5, gt=0, validation_alias="WEB_SEARCH_MAX_USES")
     # Structuring an upload emits one large JSON object (blocks + facts); 8192 output
     # tokens truncates a rich document into invalid JSON, so the ingest call uses a
-    # higher ceiling. A max_tokens stop-reason still guards against silent truncation.
-    ingest_max_tokens: int = Field(default=64000, gt=0, validation_alias="INGEST_MAX_TOKENS")
+    # higher ceiling. Set to Sonnet 4.6's max output (128k) so fine-grained,
+    # sentence-per-block structuring has the most headroom before it must truncate. A
+    # max_tokens stop-reason still guards against silent truncation. NOTE: this is the
+    # model's output ceiling — a document too large to fit even here needs per-section
+    # chunking (multiple calls), not a higher number.
+    ingest_max_tokens: int = Field(default=128000, gt=0, validation_alias="INGEST_MAX_TOKENS")
 
 
 class CortexConfig(BaseSettings):

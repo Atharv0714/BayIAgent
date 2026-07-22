@@ -11,7 +11,7 @@ Hard boundaries:
 
 Every upload produces rows for one or both fixed tables, plus a manifest.
 
-- `blocks` = readable content for retrieval (RAG). One row per coherent chunk. Prose, tables-as-markdown, image text.
+- `blocks` = readable content for retrieval (RAG). Fine-grained: one row per SINGLE idea — one sentence of prose, or one bullet/list item. Tables and images are the exception (one row per whole table/image). Prose, tables-as-markdown, image text.
 - `facts` = computable data for analytics (SQL). One row per atomic fact (EAV/long form). Any number from any document lands here so it can be SUMmed/filtered/joined.
 
 Because these schemas are fixed, the app's tables and file format are created once and never change per upload. That is what makes ingestion direct.
@@ -107,8 +107,15 @@ Numeric fidelity (this is what makes facts computable and correct):
 - If two sources conflict (e.g. a chart vs a table), emit BOTH with a conflict note; do not pick silently.
 
 Retrieval (blocks):
-- Keep chunks coherent: do not atomize prose or split multi-value cells.
-- Self-contained: fold the section label into its block.
+- Granularity: emit ONE idea per block. Split narrative prose into one sentence per block
+  (content_type=narrative); split a bullet/numbered list into one item per block. This finer
+  grain sharpens retrieval — a query matches the exact sentence, not a wall of text. Assign
+  block_order sequentially to the pieces within their section. Do NOT split mid-sentence, do
+  NOT split a multi-value table cell, and do NOT merge unrelated sentences back together.
+- Exception — keep whole: a table stays in ONE block (with its caption + markdown, see below)
+  and an image stays in ONE block; never atomize these into per-row/per-line blocks.
+- Self-contained: every block carries its section_title/section_theme, so a one-sentence block
+  still stands on its own. Fold the section label into the block where it adds needed context.
 - Tables serialize as Markdown by default (`table_markdown`, always set). Add `table_html`
   ONLY when Markdown would lose structure (merged/spanning cells, multi-row/hierarchical
   headers, nested tables); for a plain rectangular grid leave `table_html` empty. When you
@@ -118,7 +125,9 @@ Retrieval (blocks):
   entities and the period/time coverage; one sentence of what the table shows.
 - Never split a table across blocks. If a table spans pages/slides, stitch it into ONE block
   and repeat the header on each continuation — no chunk may carry headerless table rows.
-- Preserve list structure as bullet_list; do not collapse into narrative.
+- Preserve list structure as bullet_list, and emit EACH item as its own block (one bullet =
+  one block, content_type=bullet_list). Do not collapse a list into narrative, and do not pack
+  a whole list into a single block.
 
 Visual content (do not leave images as stubs):
 - OCR/vision every non-decorative image into image_ocr_text.

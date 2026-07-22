@@ -406,23 +406,62 @@ def tier_requirements(tiers: Iterable[str]) -> tuple[bool, bool]:
     return needs_identity, needs_group
 
 
+def _registry_block(registry: dict[str, list[str]] | None) -> dict[str, Any] | None:
+    """Render the known-vocabulary registry as a system text block, or None if empty.
+
+    The guide promises "the app passes a registry of known entity_types/attributes in
+    context"; this is that block. It's appended AFTER the cached guide so the guide prefix
+    stays cache-eligible, and is itself left uncached because the vocabulary grows with
+    every ingest.
+    """
+    if not registry:
+        return None
+    lines = [
+        "## Known vocabulary registry (from prior ingests)",
+        "",
+        "Before minting a NEW entity_type or attribute, check the lists below and REUSE an "
+        "existing value when one fits by meaning (not just exact spelling) — this prevents "
+        'drift like "revenue" vs "rev". Only mint a new value when nothing here fits.',
+        "",
+    ]
+    labels = {"entity_type": "Known entity_types", "attribute": "Known attributes"}
+    for field, label in labels.items():
+        values = registry.get(field)
+        if values:
+            lines.append(f"{label}: {', '.join(values)}")
+    return {"type": "text", "text": "\n".join(lines)}
+
+
 def structure_upload(
-    client: anthropic.Anthropic, config: AgentConfig, filename: str, raw: bytes
+    client: anthropic.Anthropic,
+    config: AgentConfig,
+    filename: str,
+    raw: bytes,
+    registry: dict[str, list[str]] | None = None,
 ) -> StructuredResult:
     """One-shot structuring call: file bytes -> validated StructuredResult.
+
+    ``registry`` is the known-vocabulary map (entity_type/attribute values already in the
+    facts table); when present it's appended to the system prompt so the model reuses an
+    existing value instead of minting a near-duplicate. Absent -> the model runs on the
+    guide alone (first upload into an empty warehouse, or a degraded registry read).
 
     Raises IngestError for unsupported types or when the model output can't be used
     (max_tokens truncation, non-JSON). Validation failures do NOT raise — they come
     back inside the result's `errors` so the UI can show the preview and block commit.
     """
     content = build_content_block(filename, raw)
+    system = INGEST_SYSTEM
+    block = _registry_block(registry)
+    if block is not None:
+        system = INGEST_SYSTEM + [block]
     # Streaming: a large document can emit tens of thousands of output tokens, and the
     # SDK refuses a non-streaming call whose max_tokens could exceed the 10-minute cap.
     start = time.perf_counter()
     with client.messages.stream(
         model=config.model,
         max_tokens=config.ingest_max_tokens,
-        system=INGEST_SYSTEM,
+        system=system,
         messages=[{"role": "user", "content": content}],
     ) as stream:
         resp = stream.get_final_message()

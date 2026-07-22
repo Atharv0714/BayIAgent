@@ -9,10 +9,13 @@ runs outside the read-only guard.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sf_agent.connection import SnowflakeConnection
 from sf_agent.ingest import SENSITIVITIES, StructuredResult
+
+logger = logging.getLogger("sf_agent.ingest_store")
 
 # Fixed column order for `blocks` (17 guide fields + ingest_id). `id` is a surrogate
 # the table auto-assigns and is NOT written here.
@@ -127,13 +130,20 @@ CREATE TABLE IF NOT EXISTS facts (
 # column — an INSERT with the current column list would then fail against the old table. Each
 # entry is applied with `ADD COLUMN IF NOT EXISTS`, so this self-heals older deployments and
 # stays a no-op once the column is present. Append here whenever the fixed schema grows.
+#
+# IMPORTANT — no DEFAULT here. Snowflake mis-compiles `ADD COLUMN IF NOT EXISTS <c> ... DEFAULT
+# <v>` when the column ALREADY exists: instead of no-opping it validates the DEFAULT against the
+# table and collides with the existing column, raising `002028 ambiguous column name`. The
+# no-DEFAULT form no-ops cleanly when present. Fresh tables still get the DEFAULTs from the
+# CREATE statements above; only a table upgraded from a pre-column era gets the bare column
+# (existing rows land NULL, which the write path never relies on since it always stamps a tier).
 _ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("blocks", "sensitivity", "VARCHAR DEFAULT 'internal'"),
-    ("blocks", "sensitivity_category", "VARCHAR DEFAULT 'general'"),
+    ("blocks", "sensitivity", "VARCHAR"),
+    ("blocks", "sensitivity_category", "VARCHAR"),
     ("blocks", "ingested_by", "VARCHAR"),
     ("facts", "source_block_index", "NUMBER"),
-    ("facts", "sensitivity", "VARCHAR DEFAULT 'internal'"),
-    ("facts", "sensitivity_category", "VARCHAR DEFAULT 'general'"),
+    ("facts", "sensitivity", "VARCHAR"),
+    ("facts", "sensitivity_category", "VARCHAR"),
     ("facts", "ingested_by", "VARCHAR"),
 )
 
@@ -149,6 +159,43 @@ def ensure_tables(conn: SnowflakeConnection) -> None:
     conn.execute_ddl(_CREATE_FACTS)
     for table, column, coltype in _ADDITIVE_COLUMNS:
         conn.execute_ddl(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
+
+
+# Governed-vocabulary fields fed back into the structuring prompt so the model reuses an
+# existing value instead of minting a near-duplicate ("revenue" vs "rev"). Open sets, so we
+# can't hard-gate them — we surface what's already in use and let the prompt steer reuse.
+_REGISTRY_FIELDS = ("entity_type", "attribute")
+
+
+def read_registry(conn: SnowflakeConnection, per_field: int = 100) -> dict[str, list[str]]:
+    """Read the known-vocabulary registry (distinct entity_type/attribute values) from the
+    live `facts` table, most-used first.
+
+    Returns e.g. ``{"entity_type": ["client", "competitor"], "attribute": ["revenue", ...]}``.
+    The structuring prompt already promises the app passes this back; feeding it in is what
+    keeps open vocabularies from drifting across uploads.
+
+    Best-effort by design: any failure (the table is absent on a fresh warehouse, a transient
+    error) degrades to an empty/partial registry and is logged, never raised — structuring must
+    still run, it just has no prior vocabulary to match against. The field names are fixed
+    literals from `_REGISTRY_FIELDS` (never client input), so interpolating them is injection-safe.
+    """
+    registry: dict[str, list[str]] = {}
+    for field in _REGISTRY_FIELDS:
+        try:
+            result = conn.execute(
+                f"SELECT {field} FROM facts "
+                f"WHERE {field} IS NOT NULL AND {field} <> '' "
+                f"GROUP BY {field} ORDER BY COUNT(*) DESC, {field} ASC",
+                max_rows=per_field,
+            )
+        except Exception:  # noqa: BLE001 — registry is best-effort; never block an ingest
+            logger.warning("registry read failed for %s; continuing without it", field, exc_info=True)
+            continue
+        values = [str(r[0]) for r in result.rows if r and r[0] is not None]
+        if values:
+            registry[field] = values
+    return registry
 
 
 def _insert_sql(table: str, cols: tuple[str, ...]) -> str:

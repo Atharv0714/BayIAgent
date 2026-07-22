@@ -47,7 +47,7 @@ from sf_agent.ingest import (
     tier_requirements,
     validate,
 )
-from sf_agent.ingest_store import ensure_tables, write as ingest_write
+from sf_agent.ingest_store import ensure_tables, read_registry, write as ingest_write
 from sf_agent.tools.cortex_analyst import CortexAnalystTool
 from sf_agent.tools.run_sql import RunSqlTool
 
@@ -350,10 +350,19 @@ async def ingest_structure(
     if not raw:
         return JSONResponse({"ok": False, "error": "The uploaded file is empty."}, status_code=400)
 
+    # Feed the model the vocabulary already in the warehouse so it reuses existing
+    # entity_types/attributes instead of minting near-duplicates. Read under the shared
+    # read lock (same connection the agent uses); best-effort — a failed read yields an
+    # empty registry and structuring proceeds on the guide alone.
+    registry: dict[str, list[str]] = {}
+    if STATE.connection is not None:
+        with _LOCK:
+            registry = read_registry(STATE.connection)
+
     try:
         with _LOCK:
             structured = structure_upload(
-                STATE.anthropic_client, STATE.agent_config, filename, raw
+                STATE.anthropic_client, STATE.agent_config, filename, raw, registry=registry
             )
     except IngestError as e:
         # Unsupported type -> 415; other ingest failures (truncation, bad JSON) -> 422.

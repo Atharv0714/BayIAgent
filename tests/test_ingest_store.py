@@ -4,8 +4,9 @@ No real Snowflake — a fake connection captures the SQL and bound rows so we ca
 assert column order, ingest_id injection, and type coercion without a warehouse.
 """
 
-from sf_agent.ingest import StructuredResult
-from sf_agent.ingest_store import BLOCK_COLS, FACT_COLS, ensure_tables, write
+from sf_agent.ingest import StructuredResult, _registry_block
+from sf_agent.ingest_store import BLOCK_COLS, FACT_COLS, ensure_tables, read_registry, write
+from sf_agent.types import QueryResult
 
 
 class FakeConn:
@@ -19,6 +20,79 @@ class FakeConn:
     def executemany(self, sql, rows):
         self.inserts.append((sql, rows))
         return len(rows)
+
+
+class FakeReadConn:
+    """A read connection that returns canned distinct values (or raises) per registry field.
+
+    `responses` maps a field name ("entity_type"/"attribute") to either the list-of-rows the
+    SELECT should return, or an Exception to raise — so we can drive both the happy path and
+    the degrade-gracefully path without a warehouse.
+    """
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.queries = []
+
+    def execute(self, sql, max_rows=None):
+        self.queries.append((sql, max_rows))
+        for field, resp in self.responses.items():
+            if f"SELECT {field} " in sql:
+                if isinstance(resp, Exception):
+                    raise resp
+                return QueryResult(
+                    columns=[field], rows=resp, row_count=len(resp), truncated=False
+                )
+        return QueryResult(columns=[], rows=[], row_count=0, truncated=False)
+
+
+def test_read_registry_maps_each_field_most_used_first():
+    conn = FakeReadConn(
+        {
+            "entity_type": [["client"], ["competitor"]],
+            "attribute": [["revenue"], ["gm_pct"]],
+        }
+    )
+    reg = read_registry(conn)
+    assert reg == {
+        "entity_type": ["client", "competitor"],
+        "attribute": ["revenue", "gm_pct"],
+    }
+    # The frequency ordering is pushed into SQL, and the cap is honored as a row limit.
+    assert all("ORDER BY COUNT(*) DESC" in sql for sql, _ in conn.queries)
+    assert all(cap == 100 for _, cap in conn.queries)
+
+
+def test_read_registry_omits_empty_fields():
+    conn = FakeReadConn({"entity_type": [["client"]], "attribute": []})
+    reg = read_registry(conn)
+    assert reg == {"entity_type": ["client"]}
+
+
+def test_read_registry_degrades_when_a_query_raises():
+    # A missing `facts` table (fresh warehouse) or transient error must not block ingest:
+    # the failing field is dropped and the readable field still comes back.
+    conn = FakeReadConn(
+        {"entity_type": RuntimeError("no such table"), "attribute": [["revenue"]]}
+    )
+    reg = read_registry(conn)
+    assert reg == {"attribute": ["revenue"]}
+
+
+def test_registry_block_is_none_when_empty():
+    assert _registry_block(None) is None
+    assert _registry_block({}) is None
+
+
+def test_registry_block_lists_known_values_with_reuse_instruction():
+    block = _registry_block({"entity_type": ["client"], "attribute": ["revenue", "gm_pct"]})
+    assert block is not None and block["type"] == "text"
+    text = block["text"]
+    assert "REUSE" in text
+    assert "Known entity_types: client" in text
+    assert "Known attributes: revenue, gm_pct" in text
+    # No cache_control: the registry grows per ingest, so it trails the cached guide uncached.
+    assert "cache_control" not in block
 
 
 def _structured():
