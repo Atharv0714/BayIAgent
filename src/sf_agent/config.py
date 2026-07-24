@@ -56,14 +56,29 @@ class SnowflakeIngestConfig(SnowflakeConfig):
     """Write-capable Snowflake config for the ingest load path.
 
     Shares SNOWFLAKE_ACCOUNT / SNOWFLAKE_USER and the same auth method as the
-    read connection (inherited), but points at its own role / database / schema
-    (and optionally warehouse) via SNOWFLAKE_INGEST_* so the query connection can
-    stay strictly read-only. The ingest role should be the only write-capable one.
+    read connection (inherited), but points at its own role via SNOWFLAKE_INGEST_ROLE
+    so the query connection can stay strictly read-only — the ingest role should be
+    the only write-capable one.
+
+    The security boundary here is the ROLE, not the schema: ingest must write into the
+    SAME schema the query agent reads, or ingested rows are invisible to queries. So
+    database / schema / warehouse all fall back to their read-side values when the
+    SNOWFLAKE_INGEST_* override is unset, keeping the two connections on one schema by
+    default. Only set SNOWFLAKE_INGEST_SCHEMA if that schema is also what the query
+    connection reads (SNOWFLAKE_SCHEMA).
     """
 
     role: str = Field(min_length=1, validation_alias="SNOWFLAKE_INGEST_ROLE")
-    database: str = Field(min_length=1, validation_alias="SNOWFLAKE_INGEST_DATABASE")
-    schema_name: str = Field(min_length=1, validation_alias="SNOWFLAKE_INGEST_SCHEMA")
+    database: str = Field(
+        min_length=1,
+        validation_alias=AliasChoices("SNOWFLAKE_INGEST_DATABASE", "SNOWFLAKE_DATABASE"),
+    )
+    # Falls back to the read schema so ingested `blocks`/`facts` land where the query
+    # agent looks; a divergent SNOWFLAKE_INGEST_SCHEMA silently hides ingested data.
+    schema_name: str = Field(
+        min_length=1,
+        validation_alias=AliasChoices("SNOWFLAKE_INGEST_SCHEMA", "SNOWFLAKE_SCHEMA"),
+    )
     # Warehouse falls back to the read warehouse when SNOWFLAKE_INGEST_WAREHOUSE is
     # unset, so a separate compute pool for writes is optional.
     warehouse: str = Field(

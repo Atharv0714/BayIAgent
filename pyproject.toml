@@ -21,6 +21,19 @@ web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
+    # Production process manager. Azure App Service runs the app as
+    #   gunicorn -k uvicorn.workers.UvicornWorker sf_agent.web:app
+    # Keep --workers at 1-2: the app shares ONE Snowflake connection behind a
+    # module-level lock, so every extra worker opens its own warehouse session.
+    "gunicorn>=22.0",
+]
+# Native document export (xlsx / docx / pptx / pdf) of the agent's grounded answers.
+# Pure-Python writers with light deps — no headless browser or matplotlib needed.
+docs = [
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "python-pptx>=0.6.23",
+    "reportlab>=4.0",
 ]
 
 [build-system]

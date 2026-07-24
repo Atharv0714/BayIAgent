@@ -14,6 +14,9 @@ then open http://127.0.0.1:8000.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 import os
 import threading
@@ -24,7 +27,7 @@ from typing import Any
 
 import anthropic
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
 from sf_agent.agent import AgentError, SnowflakeAgent, _extract_json
@@ -53,6 +56,7 @@ from sf_agent.ingest_store import (
     read_registry,
     write as ingest_write,
 )
+from sf_agent.export import FORMATS, answer_to_document, render_document
 from sf_agent.tools.cortex_analyst import CortexAnalystTool
 from sf_agent.tools.run_sql import RunSqlTool
 
@@ -109,15 +113,77 @@ def _caller_identity(request: Request) -> str | None:
     return cfg.dev_caller_identity
 
 
+# App Service "Easy Auth" does NOT emit a simple comma-separated groups header. It
+# injects X-MS-CLIENT-PRINCIPAL: base64 JSON holding every claim, with group object
+# IDs as repeated "groups" claims. When GROUPS_HEADER names that header we decode it;
+# any other header name keeps the original comma-separated contract (e.g. a
+# SharePoint/M365 front end that maps the claim onto a plain header itself).
+_PRINCIPAL_HEADER = "x-ms-client-principal"
+
+# Entra omits the groups claim entirely once a user is in too many groups (the token
+# would overflow), substituting these pointers to the Graph endpoint that lists them.
+# We cannot resolve those without a Graph call, so their presence means "group
+# membership is UNKNOWN" — which must read as "not a member", never as "no groups".
+_OVERAGE_CLAIMS = {"_claim_names", "_claim_sources", "hasgroups"}
+
+
+def _principal_groups(raw: str) -> list[str]:
+    """Extract group claims from an Easy Auth X-MS-CLIENT-PRINCIPAL header value.
+
+    Returns the group object IDs found in the claims array. Raises ValueError when the
+    token hit the groups "overage" limit, so the caller can fail closed rather than
+    silently treating an over-grouped user as belonging to nothing.
+    """
+    padded = raw.strip() + "=" * (-len(raw.strip()) % 4)
+    try:
+        payload = json.loads(base64.b64decode(padded).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise ValueError(f"malformed {_PRINCIPAL_HEADER} header: {e}") from e
+
+    claims = payload.get("claims") or []
+    if not isinstance(claims, list):
+        raise ValueError(f"malformed {_PRINCIPAL_HEADER} header: claims is not a list")
+
+    groups: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        typ = str(claim.get("typ", ""))
+        # Claim types arrive either bare ("groups") or as the full Microsoft URI.
+        short = typ.rsplit("/", 1)[-1].lower()
+        if short in _OVERAGE_CLAIMS:
+            raise ValueError(
+                "groups claim overflowed (overage); membership cannot be determined "
+                "from the token alone and requires a Microsoft Graph lookup"
+            )
+        if short == "groups":
+            val = str(claim.get("val", "")).strip()
+            if val:
+                groups.append(val)
+    return groups
+
+
 def _caller_groups(request: Request) -> list[str]:
-    """Resolve the caller's group memberships from the server-trusted groups header
-    (SharePoint/M365 Entra claim), falling back to the dev list locally. The header is
-    a comma-separated list; the browser can't set it (it's injected by the platform)."""
+    """Resolve the caller's group memberships from the server-trusted groups header,
+    falling back to the dev list locally. The browser cannot set either header — both
+    are injected by the platform and stripped from inbound requests.
+
+    Two wire formats are supported, chosen by the configured header NAME:
+      * X-MS-CLIENT-PRINCIPAL — Azure Easy Auth base64 JSON claims (group object IDs).
+      * anything else — a plain comma-separated list of group names/ids.
+    """
     cfg = STATE.auth_config
     if cfg is None:
         return []
     header = request.headers.get(cfg.groups_header)
     if header and header.strip():
+        if cfg.groups_header.strip().lower() == _PRINCIPAL_HEADER:
+            try:
+                return _principal_groups(header)
+            except ValueError as e:
+                # Fail CLOSED: an unreadable claim must never widen access.
+                logger.warning("could not read group claims (%s); treating caller as ungrouped", e)
+                return []
         return [g.strip() for g in header.split(",") if g.strip()]
     return cfg.dev_group_list
 
@@ -895,6 +961,59 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             "route_reason": answer.route_reason,
             "citations": answer.citations,
         }
+    )
+
+
+class ExportRequest(BaseModel):
+    # One of the SUPPORTED_FORMATS: xlsx | docx | pptx | pdf.
+    format: str
+    # The question that produced the answer — becomes the document title.
+    question: str | None = None
+    # The full /api/ask answer payload (value / answer / values / chart / sources). The
+    # export is rendered from THIS grounded answer, so it never re-queries or re-invents
+    # numbers; every figure in the document already came from a live query.
+    answer: dict[str, Any] = {}
+
+
+def _export_slug(text: str) -> str:
+    """A short, filesystem-safe slug from the question for the download filename."""
+    keep = [c.lower() if c.isalnum() else "-" for c in (text or "")]
+    slug = "".join(keep).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return (slug[:48].strip("-")) or "report"
+
+
+@app.post("/api/export")
+def export(req: ExportRequest) -> Response:
+    """Render one grounded answer into a downloadable native document.
+
+    The client posts the answer it already holds (no new model call, no re-query) plus a
+    target format; the server maps it to a format-agnostic document model and streams back
+    the file with a download filename derived from the question.
+    """
+    fmt = (req.format or "").lower().strip()
+    if fmt not in FORMATS:
+        return JSONResponse(
+            {"ok": False, "error": f"Unsupported format {req.format!r}. Choose one of: {', '.join(FORMATS)}."},
+            status_code=400,
+        )
+    if not isinstance(req.answer, dict) or not req.answer:
+        return JSONResponse({"ok": False, "error": "No answer to export."}, status_code=400)
+
+    try:
+        model = answer_to_document(req.answer, req.question)
+        data = render_document(model, fmt)
+    except Exception as e:  # noqa: BLE001 — surface render failures to the browser
+        logger.exception("web: export failed fmt=%s", fmt)
+        return JSONResponse({"ok": False, "error": f"Could not generate {fmt}: {e}"}, status_code=500)
+
+    ext, mime = FORMATS[fmt]
+    filename = f"bayi-{_export_slug(req.question or '')}-{model.generated_on}.{ext}"
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

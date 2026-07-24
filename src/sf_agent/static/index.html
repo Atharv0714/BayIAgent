@@ -190,6 +190,23 @@
     background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
   }
   .charterr { color: var(--muted); font-size: 13px; font-style: italic; padding: 6px 2px; }
+
+  /* Per-answer export bar: download this grounded answer as a native document. */
+  .exportbar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .exlabel {
+    color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+    font-family: var(--display); font-weight: 700; margin-right: 4px;
+  }
+  .exbtn {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 999px; padding: 5px 12px; font-family: var(--display);
+    font-weight: 600; font-size: 12px; cursor: pointer;
+  }
+  .exbtn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .exbtn:disabled { opacity: .5; cursor: default; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
@@ -273,6 +290,15 @@ function newId() {
 const INK = "#1e1630", MUTED = "#6b6480", GRID = "rgba(30,22,48,.09)";
 const CHART_COLORS = ["#7c3aed","#d6249f","#a855f7","#ec4899","#6366f1","#c026d3","#8b5cf6","#f472b6","#4f46e5","#db2777"];
 let chartSeq = 0, pendingCharts = [], chartInstances = {};
+
+// Native document formats offered under every grounded answer. Each button posts the
+// answer payload to /api/export, which renders a real Office/PDF file server-side.
+const EXPORT_FORMATS = [
+  { id: "xlsx", label: "Excel" },
+  { id: "docx", label: "Word" },
+  { id: "pptx", label: "PowerPoint" },
+  { id: "pdf", label: "PDF" },
+];
 
 const EXAMPLES = [
   "How many distinct clients are there?",
@@ -529,7 +555,54 @@ function botInner(d) {
     html += `</details>`;
   }
   html += diagnostics(d);
+  html += exportBar();
   return html;
+}
+
+// The download-as-document toolbar shown beneath every grounded answer. Buttons carry
+// only the format; the click handler resolves which answer they belong to from the DOM.
+function exportBar() {
+  return `<div class="exportbar"><span class="exlabel">Export</span>`
+    + EXPORT_FORMATS.map((f) => `<button class="exbtn" data-fmt="${f.id}">${esc(f.label)}</button>`).join("")
+    + `</div>`;
+}
+
+// The user question that produced the bot answer at message index `idx` — the nearest
+// preceding user turn. Becomes the exported document's title and filename.
+function questionFor(idx) {
+  for (let i = idx - 1; i >= 0; i--) if (messages[i].role === "user") return messages[i].text || "";
+  return "";
+}
+
+// POST the grounded answer to the server, which renders a native file, then trigger a
+// browser download of the returned blob. Errors surface inline without losing the answer.
+async function exportDoc(fmt, data, question, btn) {
+  const prev = btn.textContent;
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await fetch("/api/export", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: fmt, question, answer: data }),
+    });
+    if (!r.ok) {
+      let msg = "Export failed";
+      try { const j = await r.json(); msg = j.error || msg; } catch {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const name = m ? m[1] : `bayi-report.${fmt}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("Could not export: " + (e && e.message ? e.message : e));
+  } finally {
+    btn.disabled = false; btn.textContent = prev;
+  }
 }
 
 // Format a USD cost that is usually a fraction of a cent.
@@ -561,13 +634,14 @@ function diagnostics(d) {
     + `<table class="data kv"><tbody>${body}</tbody></table></details>`;
 }
 
-function renderMessage(m) {
+function renderMessage(m, idx) {
   const wrap = document.createElement("div");
   if (m.role === "user") {
     wrap.className = "msg user";
     wrap.innerHTML = `<div class="bubble">${esc(m.text)}</div>`;
   } else {
     wrap.className = "msg bot" + (m.data && m.data.ok === false ? " err" : "");
+    wrap.dataset.msgIndex = idx; // so the export buttons can find this answer's payload
     wrap.innerHTML = `<div class="bubble">${botInner(m.data)}</div>`;
   }
   return wrap;
@@ -587,7 +661,7 @@ function renderAll() {
     threadEl.appendChild(e);
     return;
   }
-  for (const m of messages) threadEl.appendChild(renderMessage(m));
+  messages.forEach((m, i) => threadEl.appendChild(renderMessage(m, i)));
   flushCharts();
   scrollDown();
 }
@@ -695,7 +769,14 @@ pdfBtn.addEventListener("click", downloadPdf);
 qEl.addEventListener("input", autosize);
 qEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
 threadEl.addEventListener("click", (e) => {
-  if (e.target.classList.contains("chip")) { qEl.value = e.target.textContent; autosize(); qEl.focus(); }
+  if (e.target.classList.contains("chip")) { qEl.value = e.target.textContent; autosize(); qEl.focus(); return; }
+  const ex = e.target.closest(".exbtn");
+  if (ex) {
+    const bot = ex.closest(".msg.bot");
+    const idx = bot ? Number(bot.dataset.msgIndex) : -1;
+    const m = messages[idx];
+    if (m && m.data && m.data.ok !== false) exportDoc(ex.getAttribute("data-fmt"), m.data, questionFor(idx), ex);
+  }
 });
 
 document.getElementById("brandMark").innerHTML = boMark(28, false);
