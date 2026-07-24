@@ -197,6 +197,26 @@ def _caller_is_protected(request: Request) -> bool:
     return cfg.protected_group in _caller_groups(request)
 
 
+def _scope_read_internal_only() -> None:
+    """Fail-closed scoping for the shared read connection before an UNBOUND read.
+
+    The one read connection carries whatever ``BAYI_CALLER`` the previous ``/api/ask``
+    bound. Once ``rap_ownership`` is attached, any query that does NOT set an identity
+    first inherits that stale caller — so an unbound read (the vocabulary registry) would
+    read through the *previous* user's private/protected rows. The registry is a shared
+    vocabulary helper (distinct entity_type/attribute values fed back to structuring), so
+    it must only ever see 'internal' rows. Binding the caller to unset + protected='false'
+    makes the policy return internal rows only, regardless of who queried last. No-op when
+    enforcement is off (nothing reads the variables) and safe to leave set between requests
+    — /api/ask re-binds the real caller before it queries."""
+    auth = STATE.auth_config
+    if auth is None or STATE.connection is None:
+        return
+    STATE.connection.bind_session(
+        {auth.caller_session_var: None, auth.protected_session_var: "false"}
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Open one Snowflake connection and build whichever agents are configured."""
@@ -428,6 +448,11 @@ async def ingest_structure(
     registry: dict[str, list[str]] = {}
     if STATE.connection is not None:
         with _LOCK:
+            # Scope to internal-only FIRST: this read binds no caller, so once the
+            # row-access policy is live it would otherwise inherit whatever identity the
+            # last /api/ask left on the shared session. The registry is shared vocabulary
+            # and must never surface a private/protected row's entity_type/attribute.
+            _scope_read_internal_only()
             registry = read_registry(STATE.connection)
 
     try:
