@@ -38,6 +38,28 @@ burn without adding throughput. And `/home` is the persisted Azure Files mount,
 so the materialized key and the `.ingest_drafts/` directory survive restarts;
 `/tmp` does not.
 
+## Per-request isolation and the shared session
+
+The row-access policy filters private/protected rows using session variables
+(`BAYI_CALLER`, `BAYI_PROTECTED`) that the app re-`SET`s per request on that one
+shared connection. Snowflake's `GETVARIABLE` docs warn the function result-caches
+within a session "including the body of policy objects", which raised the question:
+does a re-`SET` for the next caller invalidate the cache, or does the policy keep
+evaluating the previous caller and leak their private rows?
+
+**Settled empirically on 2026-07-24: the cache invalidates on `SET` — the shared
+session is safe.** `scripts/gov_session_probe.py` reproduces it on a scratch table
+via the app's own `SnowflakeConnection`: bind Alice → sees only Alice's; re-bind Bob
+on the *same* session → Alice's private row is gone. `tests/test_governance_isolation.py`
+is the `integration`-marked regression guard. Re-run either if the connection model
+or the policy body ever changes.
+
+This is why no per-request/per-caller connection was introduced. It does **not**
+unlock raising `--workers` above 1: that limit is about warehouse credit (N workers =
+N sessions) and per-process in-memory state (`STATE.conversations` for follow-ups,
+`STATE.pending_ingests` for drafts), neither of which the isolation result changes.
+Leave it at 1 unless you add a shared store + sticky routing and review the credit cost.
+
 ## Secrets
 
 Five secrets live in `kv-bayi-agent`, wired into app settings as Key Vault
@@ -158,19 +180,37 @@ overage properly needs a Graph call, which this app does not make. If you have
 users in that many groups, either use a Graph lookup or scope the groups claim to
 assigned groups only in the app registration's Token configuration.
 
-## Enabling ownership enforcement
+## Governance model — applied 2026-07-24
 
-`ENFORCE_OWNERSHIP` is `false`. Do not flip it until **both** are true:
+The Snowflake side is now provisioned (this account: `BAYONE_INTERNALINFO.PUBLIC`):
 
-1. Entra sign-in is verified end to end — you can see a real UPN reaching the app.
-2. `docs/sql/02_columns.sql` and `docs/sql/03_row_access_policy.sql` have been
-   applied.
+1. `deploy/snowflake-roles.sql` — `BAYI_READ` / `BAYI_ADMIN_READ` / `BAYI_INGEST_WRITE`
+   created; `blocks`/`facts` **ownership** moved to `BAYI_INGEST_WRITE`.
+2. `deploy/snowflake-governance-test.sql` (or `scripts/gov_session_probe.py`) — passed.
+3. `deploy/snowflake-governance.sql` — sensitivity columns backfilled and the
+   `rap_ownership` row-access policy attached to `blocks` and `facts`.
 
-Without (2) the app sets the `BAYI_CALLER` session variable and no row-access
-policy reads it. Queries succeed, `/api/ask` starts requiring an identity, and it
-looks like per-owner isolation is working — but every row is still visible to
-everyone. That failure is silent and convincing, which is what makes it worth
-this warning.
+Two corrections in `snowflake-governance.sql` that are easy to miss when re-running
+this elsewhere (both are documented in that file):
+
+- **The backfill is not optional.** Pre-tiering rows had `sensitivity = NULL` (the
+  app's `_ADDITIVE_COLUMNS` path adds the column without a `DEFAULT`), and the policy
+  hides `NULL` rows — attaching without backfilling silently hides every old row.
+  Measured here: 35/115 blocks and 58/74 facts were `NULL`; they are now `internal`.
+  The backfill must run with the policy **detached** (the owner role can't see `NULL`
+  rows through the policy), so the script order is detach → backfill → attach.
+- **`ACCOUNTADMIN` attaches via `APPLY ROW ACCESS POLICY`, not ownership.** Since
+  `blocks`/`facts` are owned by `BAYI_INGEST_WRITE`, the script grants
+  `APPLY ROW ACCESS POLICY ON ACCOUNT` to `ACCOUNTADMIN` so it can set/unset the policy
+  on tables it no longer owns.
+
+### Enabling ownership enforcement
+
+`ENFORCE_OWNERSHIP` is `false` (and stays `false` in committed config). The Snowflake
+policy is live, so flipping it is now only gated on **Entra sign-in being verified end
+to end** — a real UPN reaching the app. Until then, with the app on `BAYI_READ` and no
+identity bound, the policy already fails closed: only `internal` rows are visible, so a
+private row would be hidden from *everyone* including its owner until enforcement is on.
 
 ```bash
 az webapp config appsettings set -n BayIInternalAgent -g BayIAgent \
@@ -178,15 +218,53 @@ az webapp config appsettings set -n BayIInternalAgent -g BayIAgent \
 az webapp restart -n BayIInternalAgent -g BayIAgent
 ```
 
-Then verify isolation the way `docs/sql/README.md` describes: ingest a private
-document as one user, confirm a second user's question does not surface it, and
-confirm the first user's does.
+### Verifying isolation
+
+`scripts/gov_e2e_check.py` is the check (safe to run against production — it inserts one
+labelled private row, proves Alice sees it while Bob and an unbound caller do not, then
+deletes it):
+
+```bash
+.venv/bin/python scripts/gov_e2e_check.py   # exit 0 = isolated
+```
+
+### Rolling back
+
+Enforcement and the policy come off independently, both reversible:
+
+```bash
+# 1. Stop binding identities (app behaves as before the feature)
+az webapp config appsettings set -n BayIInternalAgent -g BayIAgent \
+    --settings ENFORCE_OWNERSHIP=false
+az webapp restart -n BayIInternalAgent -g BayIAgent
+```
+```sql
+-- 2. Detach the policy entirely (rows all become visible again to BAYI_READ).
+--    As ACCOUNTADMIN (holds APPLY ROW ACCESS POLICY):
+ALTER TABLE blocks DROP ROW ACCESS POLICY rap_ownership;
+ALTER TABLE facts  DROP ROW ACCESS POLICY rap_ownership;
+```
+
+## Decisions left for a human
+
+- **`ACCOUNTADMIN` break-glass bypass.** `rap_ownership` ends with
+  `current_role() IN ('BAYI_ADMIN_READ', 'ACCOUNTADMIN')` — a permanent, unlogged read
+  of every private/protected row by anyone who can `USE ROLE ACCOUNTADMIN`. It is
+  tolerable only because the app connects as `BAYI_READ`. **Proposed:** grant
+  `BAYI_ADMIN_READ` to a *named* human for break-glass (audited via `query_history`),
+  then drop `ACCOUNTADMIN` from the policy's admin branch. Not done unilaterally — it
+  removes the only admin path back into private data if `BAYI_ADMIN_READ` is misplaced.
+- **Protected tier / `SG-BayI-Sensitive`.** Still does not exist in the tenant;
+  `PROTECTED_GROUP` is an all-zeros GUID (fail-closed). To enable: a Groups Administrator
+  creates the Entra security group, then set `PROTECTED_GROUP` to its **object-ID GUID**
+  (not the display name) and confirm the groups claim is emitted (see "Group claims").
+- **Worker count.** Stays at 1 (see "Per-request isolation"); raising it is a separate
+  credit + shared-state decision.
 
 ## Outstanding
 
-- `docs/sql/02_columns.sql` and `03_row_access_policy.sql` are not applied, so the
-  private and protected tiers are inert.
-- `SG-BayI-Sensitive` does not exist in the tenant.
+- The protected tier is inert until `SG-BayI-Sensitive` exists and `PROTECTED_GROUP`
+  holds its GUID (above).
 - The Snowflake service user is `ASHARMA3`, a named human account, not a service
   account. Key-pair auth on a personal identity means offboarding that user breaks
   the app.

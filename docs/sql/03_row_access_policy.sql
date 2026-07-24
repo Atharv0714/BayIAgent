@@ -3,6 +3,13 @@
 -- ----------------------------------------------------------------------------
 -- Run as ACCOUNTADMIN, after 02_columns.sql. Idempotent.
 --
+-- >>> CORRECTION (see deploy/snowflake-governance.sql, which supersedes this file) <<<
+-- If 01_roles.sql transferred OWNERSHIP of blocks/facts to BAYI_INGEST_WRITE, then
+-- ACCOUNTADMIN can no longer ALTER those tables to attach a policy. Grant
+-- `APPLY ROW ACCESS POLICY ON ACCOUNT TO ROLE ACCOUNTADMIN` first (centralised policy
+-- admin — attach/detach without table ownership). Also backfill NULL sensitivity BEFORE
+-- attaching (see 02_columns.sql correction), or the policy hides every pre-tiering row.
+--
 -- Replace placeholders:
 --   <<DATABASE>>   e.g. BAYONE_INTERNALINFO
 --   <<SCHEMA>>     e.g. PUBLIC
