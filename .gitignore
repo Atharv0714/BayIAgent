@@ -27,3 +27,6 @@ build/
 
 # Local sample decks / node scratch (not part of the agent)
 deck/
+
+# Scratch: files the bridge cannot delete
+_to_delete/

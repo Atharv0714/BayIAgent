@@ -26,10 +26,14 @@ CONFIG_FILE="${CONFIG_FILE:-$(dirname "${BASH_SOURCE[0]}")/config.sh}"
 if [[ -f "$CONFIG_FILE" ]]; then
     while IFS= read -r line; do
         [[ "$line" =~ ^[[:space:]]*# || -z "${line// /}" ]] && continue
-        key="${line%%=*}"; key="${key// /}"
+        # KEY="value"  with an optional trailing # comment. Matching the closing
+        # quote explicitly is what keeps the comment out of the value — a plain
+        # suffix-strip silently appends it, and the failure surfaces much later as
+        # an unparseable resource name.
+        [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=\"([^\"]*)\" ]] || continue
+        key="${BASH_REMATCH[1]}"
         [[ -n "${!key-}" ]] && continue          # environment overrides the file
-        val="${line#*=}"; val="${val%\"}"; val="${val#\"}"
-        printf -v "$key" '%s' "$val"
+        printf -v "$key" '%s' "${BASH_REMATCH[2]}"
         export "${key?}"
     done < "$CONFIG_FILE"
 fi
@@ -81,16 +85,39 @@ if ! az webapp list-runtimes --os-type linux -o tsv | grep -qi "^PYTHON:${PYTHON
     die "PYTHON:${PYTHON_VERSION} is not offered. Pick a supported version and set PYTHON_VERSION."
 fi
 
-step "App Service plan: $PLAN_NAME ($PLAN_SKU, Linux)"
-az appservice plan create \
-    --name "$PLAN_NAME" --resource-group "$RESOURCE_GROUP" \
-    --location "$LOCATION" --sku "$PLAN_SKU" --is-linux -o none
+step "App Service plan: $PLAN_NAME"
+# Never resize a plan that already exists — the SKU is a billing decision, and
+# silently moving someone's P1v3 to B1 (or the reverse) is not this script's call.
+if EXISTING_SKU="$(az appservice plan show --name "$PLAN_NAME" --resource-group "$RESOURCE_GROUP" \
+        --query sku.name -o tsv 2>/dev/null)" && [[ -n "$EXISTING_SKU" ]]; then
+    info "exists at SKU $EXISTING_SKU — reusing, not resizing"
+    [[ "$EXISTING_SKU" != "$PLAN_SKU" ]] && \
+        info "note: config.sh says $PLAN_SKU. To change it: az appservice plan update --sku $PLAN_SKU"
+else
+    info "creating at $PLAN_SKU"
+    az appservice plan create \
+        --name "$PLAN_NAME" --resource-group "$RESOURCE_GROUP" \
+        --location "$LOCATION" --sku "$PLAN_SKU" --is-linux -o none
+fi
 
 step "Web app: $APP_NAME"
 az webapp create \
     --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --plan "$PLAN_NAME" \
     --runtime "PYTHON:${PYTHON_VERSION}" -o none 2>/dev/null \
     || info "already exists — leaving in place"
+
+# --runtime above is only honoured on CREATE. An app that already exists keeps
+# whatever stack it was made with (BayIInternalAgent was created as 3.12), so set
+# it explicitly. This is what pins the app to the interpreter uv.lock resolved for.
+CURRENT_FX="$(az webapp config show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+    --query linuxFxVersion -o tsv)"
+if [[ "$CURRENT_FX" != "PYTHON|${PYTHON_VERSION}" ]]; then
+    info "runtime is $CURRENT_FX — setting PYTHON|${PYTHON_VERSION}"
+    az webapp config set --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+        --linux-fx-version "PYTHON|${PYTHON_VERSION}" -o none
+else
+    info "runtime already PYTHON|${PYTHON_VERSION}"
+fi
 
 step "Key Vault: $VAULT_NAME (RBAC authorization)"
 az keyvault create \
