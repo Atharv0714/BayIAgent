@@ -207,8 +207,12 @@
   }
   .exbtn:hover { border-color: var(--accent2); color: var(--accent2); }
   .exbtn:disabled { opacity: .5; cursor: default; }
-  /* The format the agent auto-generated from a "make a …" question. */
-  .exbtn.exgen { border-color: var(--accent2); color: var(--accent2); font-weight: 700; background: rgba(214,36,159,.08); }
+  /* The format the question asked for — the primary one-click download. */
+  .exbtn.exgen {
+    border: 0; color: #fff; font-weight: 700;
+    background: linear-gradient(135deg, var(--bo-purple), var(--bo-magenta) 60%, var(--bo-pink));
+  }
+  .exbtn.exgen:hover { color: #fff; filter: brightness(1.05); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
@@ -563,18 +567,19 @@ function botInner(d) {
 
 // The download-as-document toolbar shown beneath every grounded answer. Buttons carry
 // only the format; the click handler resolves which answer they belong to from the DOM.
-// When the question itself asked for a document (d.export_format), that format was already
-// generated and downloaded on arrival — the bar then reads "Generated <X>" and highlights
-// it, and the other buttons still offer the answer in the remaining formats.
+// When the question itself asked for a document (d.export_format), nothing is downloaded
+// automatically — the bar invites the user to download that format, styling its button as
+// the primary action, while the other buttons still offer the remaining formats.
 function exportBar(d) {
   const gen = d && d.export_format;
   const genLabel = gen ? ((EXPORT_FORMATS.find((f) => f.id === gen) || {}).label || gen) : null;
   const lead = gen
-    ? `<span class="exlabel">Generated ${esc(genLabel)} · download again</span>`
+    ? `<span class="exlabel">You asked for a ${esc(genLabel)} — download it:</span>`
     : `<span class="exlabel">Export</span>`;
   return `<div class="exportbar">${lead}`
     + EXPORT_FORMATS.map((f) =>
-        `<button class="exbtn${f.id === gen ? " exgen" : ""}" data-fmt="${f.id}">${esc(f.label)}</button>`).join("")
+        `<button class="exbtn${f.id === gen ? " exgen" : ""}" data-fmt="${f.id}">`
+        + `${f.id === gen ? "⬇ " : ""}${esc(f.label)}</button>`).join("")
     + `</div>`;
 }
 
@@ -717,14 +722,9 @@ async function send() {
   busy = false; sendBtn.disabled = false;
   renderAll(); save();
   qEl.focus();
-
-  // The question asked for an office document — generate it from THIS grounded answer and
-  // start the download. Fires once here (not in renderAll), so reopening a saved chat does
-  // not re-download. The export bar still lets the user re-download or pick another format.
-  if (data.ok && data.export_format) {
-    downloadExport(data.export_format, data, question).catch((e) =>
-      alert("Could not generate the document: " + (e && e.message ? e.message : e)));
-  }
+  // Note: when the question asked for a document (data.export_format), we do NOT download
+  // automatically — the answer's export bar surfaces a highlighted one-click download for
+  // that format, so the user chooses when (and whether) to generate the file.
 }
 
 // Rasterize the whole thread (charts and tables included) and slice it into an
