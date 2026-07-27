@@ -162,7 +162,16 @@ class AuthConfig(BaseSettings):
 
 
 class AgentConfig(BaseSettings):
-    """Config for the Anthropic tool-use agent loop, loaded from env / .env."""
+    """Config for the tool-use agent loop, loaded from env / .env.
+
+    The loop talks to any Anthropic-Messages-compatible endpoint via the ``anthropic``
+    SDK. To run Anthropic (the default), set ``ANTHROPIC_API_KEY`` and leave
+    ``ANTHROPIC_BASE_URL`` unset. To run Z.AI's GLM models instead — Z.AI exposes an
+    Anthropic-compatible endpoint — put the Z.AI key in ``ANTHROPIC_API_KEY``, set
+    ``ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic`` and ``AGENT_MODEL=glm-5.2``.
+    Nothing else in the loop changes; the same key drives the query agent, the router,
+    document structuring, and the ingest editor.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -172,6 +181,11 @@ class AgentConfig(BaseSettings):
     )
 
     api_key: str = Field(validation_alias="ANTHROPIC_API_KEY")
+    # Base URL for the Anthropic-compatible endpoint. Blank/unset -> Anthropic's default.
+    # Set to https://api.z.ai/api/anthropic to run GLM on Z.AI. Bound here (rather than
+    # relying only on the SDK's own ANTHROPIC_BASE_URL env read) so the provider is an
+    # explicit, testable part of the config and is passed to every client we build.
+    base_url: str | None = Field(default=None, validation_alias="ANTHROPIC_BASE_URL")
     model: str = Field(default="claude-sonnet-4-6", validation_alias="AGENT_MODEL")
     max_rounds: int = Field(default=8, gt=0, validation_alias="AGENT_MAX_ROUNDS")
     max_tokens: int = Field(default=8192, gt=0, validation_alias="AGENT_MAX_TOKENS")
@@ -186,6 +200,15 @@ class AgentConfig(BaseSettings):
     # model's output ceiling — a document too large to fit even here needs per-section
     # chunking (multiple calls), not a higher number.
     ingest_max_tokens: int = Field(default=128000, gt=0, validation_alias="INGEST_MAX_TOKENS")
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v: object) -> object:
+        # An empty ANTHROPIC_BASE_URL (common in a half-filled .env / app settings) must
+        # mean "use the default endpoint", not an invalid empty URL.
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
 
 class CortexConfig(BaseSettings):

@@ -50,10 +50,20 @@ class AgentError(RuntimeError):
 _CACHE_CONTROL = {"type": "ephemeral"}
 
 
-# claude-sonnet-4-6 list pricing, USD per million tokens. Used only to show an
-# estimated per-answer cost in the UI diagnostics; if AGENT_MODEL is changed this
-# becomes an approximation.
-_PRICE_PER_MTOK = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}
+# List pricing, USD per million tokens, used only for the UI's estimated per-answer cost.
+# Picked by model family so the estimate tracks the provider actually in use (Anthropic vs
+# Z.AI GLM). Both are approximations for any other model; the real bill is the provider's.
+_ANTHROPIC_PRICE = {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75}
+# Z.AI GLM pricing (approx — based on the published GLM-4.x line; confirm current GLM-5.2
+# rates on z.ai). Cache read/write are estimates: GLM's cache pricing on the
+# Anthropic-compatible endpoint isn't separately published, so these are set conservatively
+# (no large discount assumed) rather than understating cost.
+_GLM_PRICE = {"input": 0.60, "output": 2.20, "cache_read": 0.11, "cache_write": 0.60}
+
+
+def _price_for_model(model: str) -> dict[str, float]:
+    """The per-million-token price table for the configured model's family."""
+    return _GLM_PRICE if str(model).lower().startswith("glm") else _ANTHROPIC_PRICE
 
 # Pull the table after FROM/JOIN — either a quoted identifier ("Billable Data ...")
 # or a bare dotted name (schema.table) — to report which sources an answer drew from.
@@ -102,8 +112,9 @@ def _tool_spec(tool: Tool) -> dict[str, Any]:
     return {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
 
 
-def _estimate_cost(usage: dict[str, int]) -> float:
-    return round(sum(usage.get(k, 0) / 1_000_000 * p for k, p in _PRICE_PER_MTOK.items()), 6)
+def _estimate_cost(usage: dict[str, int], model: str) -> float:
+    price = _price_for_model(model)
+    return round(sum(usage.get(k, 0) / 1_000_000 * p for k, p in price.items()), 6)
 
 
 def _extract_sources(sqls: list[str]) -> list[str]:
@@ -126,13 +137,13 @@ def _extract_sources(sqls: list[str]) -> list[str]:
     return seen
 
 
-def _merge_usage(answer: AgentAnswer, extra: dict[str, int]) -> None:
+def _merge_usage(answer: AgentAnswer, extra: dict[str, int], model: str) -> None:
     """Fold an extra call's token usage (e.g. the router) into an answer's diagnostics,
     then recompute the total and estimated cost so the panel stays honest."""
     for k in ("input", "output", "cache_read", "cache_write"):
         answer.tokens[k] = answer.tokens.get(k, 0) + extra.get(k, 0)
     answer.tokens["total"] = sum(v for k, v in answer.tokens.items() if k != "total")
-    answer.cost_usd = _estimate_cost(answer.tokens)
+    answer.cost_usd = _estimate_cost(answer.tokens, model)
 
 
 def _extract_web(content: list[Any]) -> tuple[str, list[dict[str, str]]]:
@@ -215,21 +226,24 @@ class SnowflakeAgent:
     ) -> None:
         self._tools: dict[str, Tool] = {t.name: t for t in tools}
         self._config = config
-        self._client = client or anthropic.Anthropic(api_key=config.api_key)
+        # base_url=None keeps the SDK's default (Anthropic); a Z.AI base URL routes the
+        # same Messages calls to GLM. One switch moves the whole loop between providers.
+        self._client = client or anthropic.Anthropic(
+            api_key=config.api_key, base_url=config.base_url
+        )
 
     def ask(self, question: str) -> AgentAnswer:
         """Single-shot: answer `question` with no prior context."""
         answer, _ = self.converse([], question)
         return answer
 
-    @staticmethod
     def _attach_diag(
-        answer: AgentAnswer, start: float, usage: dict[str, int], source_sql: list[str]
+        self, answer: AgentAnswer, start: float, usage: dict[str, int], source_sql: list[str]
     ) -> AgentAnswer:
         """Record timing, token usage/cost, and data sources onto the answer."""
         answer.elapsed_ms = (time.perf_counter() - start) * 1000
         answer.tokens = {**usage, "total": sum(usage.values())}
-        answer.cost_usd = _estimate_cost(usage)
+        answer.cost_usd = _estimate_cost(usage, self._config.model)
         answer.sources = _extract_sources(source_sql)
         return answer
 
@@ -400,7 +414,7 @@ class SnowflakeAgent:
 
         answer.route = decision.route
         answer.route_reason = decision.reason
-        _merge_usage(answer, router_usage)
+        _merge_usage(answer, router_usage, self._config.model)
         logger.info("routed q=%r -> %s (%s)", question, decision.route, decision.reason)
         return answer, updated
 
@@ -470,7 +484,7 @@ class SnowflakeAgent:
             )
             answer.elapsed_ms = (time.perf_counter() - start) * 1000
             answer.tokens = {**usage, "total": sum(usage.values())}
-            answer.cost_usd = _estimate_cost(usage)
+            answer.cost_usd = _estimate_cost(usage, self._config.model)
             logger.warning("web route failed q=%r err=%s", question, e)
             return answer, history  # don't persist a broken turn
 
@@ -492,7 +506,7 @@ class SnowflakeAgent:
         )
         answer.elapsed_ms = (time.perf_counter() - start) * 1000
         answer.tokens = {**usage, "total": sum(usage.values())}
-        answer.cost_usd = _estimate_cost(usage)
+        answer.cost_usd = _estimate_cost(usage, self._config.model)
 
         # Persist compact text turns so follow-ups keep context without the raw
         # server-tool blocks (which can't be replayed to a call that lacks the tool).

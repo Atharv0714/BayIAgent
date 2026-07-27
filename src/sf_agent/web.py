@@ -275,7 +275,9 @@ async def lifespan(app: FastAPI):
 
     # Shared Anthropic client + config for the one-shot ingest structuring call.
     STATE.agent_config = agent_config
-    STATE.anthropic_client = anthropic.Anthropic(api_key=agent_config.api_key)
+    STATE.anthropic_client = anthropic.Anthropic(
+        api_key=agent_config.api_key, base_url=agent_config.base_url
+    )
 
     # Per-owner enforcement config always loads (all fields have safe defaults, so it
     # never raises). With enforce_ownership false it's a no-op; true turns on identity

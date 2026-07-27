@@ -40,6 +40,10 @@ CORTEX_SEMANTIC_VIEW="BAYONE_INTERNALINFO.PUBLIC.BILLABLE_SEMANTIC"
 CORTEX_TIMEOUT_S="60"
 
 # ── Agent loop ───────────────────────────────────────────────────────────────
+# Endpoint base URL. Blank = Anthropic (default). For Z.AI GLM set
+# ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic", point the anthropic-api-key Key
+# Vault secret at the Z.AI key, and set AGENT_MODEL="glm-5.2".
+ANTHROPIC_BASE_URL=""
 AGENT_MODEL="claude-sonnet-4-6"
 AGENT_MAX_ROUNDS="8"
 AGENT_MAX_TOKENS="8192"

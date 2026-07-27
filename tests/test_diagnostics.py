@@ -40,11 +40,17 @@ def test_is_discovery_only_for_small_select_star():
 def test_estimate_cost_uses_per_category_pricing():
     # 1M input @ $3 + 1M output @ $15 + 1M cache_read @ $0.30 + 1M cache_write @ $3.75
     usage = {"input": 1_000_000, "output": 1_000_000, "cache_read": 1_000_000, "cache_write": 1_000_000}
-    assert _estimate_cost(usage) == round(3.0 + 15.0 + 0.30 + 3.75, 6)
+    assert _estimate_cost(usage, "claude-sonnet-4-6") == round(3.0 + 15.0 + 0.30 + 3.75, 6)
 
 
 def test_estimate_cost_zero_for_empty_usage():
-    assert _estimate_cost({}) == 0.0
+    assert _estimate_cost({}, "claude-sonnet-4-6") == 0.0
+
+
+def test_estimate_cost_uses_glm_pricing_for_glm_model():
+    # The same usage costs less on GLM — the estimate must track the configured provider.
+    usage = {"input": 1_000_000, "output": 1_000_000, "cache_read": 0, "cache_write": 0}
+    assert _estimate_cost(usage, "glm-5.2") == round(0.60 + 2.20, 6)
 
 
 # --- _compact_discovery_content ------------------------------------------------

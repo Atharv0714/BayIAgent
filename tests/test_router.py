@@ -79,7 +79,7 @@ def test_usage_from_handles_missing_usage():
 def test_merge_usage_folds_extra_and_recomputes_total_and_cost():
     ans = AgentAnswer(answer="x", value=None, values={}, executed_sql=[])
     ans.tokens = {"input": 100, "output": 50, "cache_read": 0, "cache_write": 0, "total": 150}
-    _merge_usage(ans, {"input": 20, "output": 10, "cache_read": 0, "cache_write": 0})
+    _merge_usage(ans, {"input": 20, "output": 10, "cache_read": 0, "cache_write": 0}, "claude-sonnet-4-6")
     assert ans.tokens["input"] == 120
     assert ans.tokens["output"] == 60
     assert ans.tokens["total"] == 180
