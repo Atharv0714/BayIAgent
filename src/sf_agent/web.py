@@ -56,7 +56,12 @@ from sf_agent.ingest_store import (
     read_registry,
     write as ingest_write,
 )
-from sf_agent.export import FORMATS, answer_to_document, render_document
+from sf_agent.export import (
+    FORMATS,
+    answer_to_document,
+    detect_export_request,
+    render_document,
+)
 from sf_agent.tools.cortex_analyst import CortexAnalystTool
 from sf_agent.tools.run_sql import RunSqlTool
 
@@ -985,6 +990,10 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             "route": answer.route,
             "route_reason": answer.route_reason,
             "citations": answer.citations,
+            # When the question asked for an office document ("make a PPTX of…"), tell the
+            # UI which format so it auto-renders the file from THIS grounded answer via
+            # /api/export — no re-query, no extra model call. None for ordinary questions.
+            "export_format": detect_export_request(question),
         }
     )
 

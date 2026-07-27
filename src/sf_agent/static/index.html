@@ -207,6 +207,8 @@
   }
   .exbtn:hover { border-color: var(--accent2); color: var(--accent2); }
   .exbtn:disabled { opacity: .5; cursor: default; }
+  /* The format the agent auto-generated from a "make a …" question. */
+  .exbtn.exgen { border-color: var(--accent2); color: var(--accent2); font-weight: 700; background: rgba(214,36,159,.08); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
@@ -555,15 +557,24 @@ function botInner(d) {
     html += `</details>`;
   }
   html += diagnostics(d);
-  html += exportBar();
+  html += exportBar(d);
   return html;
 }
 
 // The download-as-document toolbar shown beneath every grounded answer. Buttons carry
 // only the format; the click handler resolves which answer they belong to from the DOM.
-function exportBar() {
-  return `<div class="exportbar"><span class="exlabel">Export</span>`
-    + EXPORT_FORMATS.map((f) => `<button class="exbtn" data-fmt="${f.id}">${esc(f.label)}</button>`).join("")
+// When the question itself asked for a document (d.export_format), that format was already
+// generated and downloaded on arrival — the bar then reads "Generated <X>" and highlights
+// it, and the other buttons still offer the answer in the remaining formats.
+function exportBar(d) {
+  const gen = d && d.export_format;
+  const genLabel = gen ? ((EXPORT_FORMATS.find((f) => f.id === gen) || {}).label || gen) : null;
+  const lead = gen
+    ? `<span class="exlabel">Generated ${esc(genLabel)} · download again</span>`
+    : `<span class="exlabel">Export</span>`;
+  return `<div class="exportbar">${lead}`
+    + EXPORT_FORMATS.map((f) =>
+        `<button class="exbtn${f.id === gen ? " exgen" : ""}" data-fmt="${f.id}">${esc(f.label)}</button>`).join("")
     + `</div>`;
 }
 
@@ -575,29 +586,36 @@ function questionFor(idx) {
 }
 
 // POST the grounded answer to the server, which renders a native file, then trigger a
-// browser download of the returned blob. Errors surface inline without losing the answer.
+// browser download of the returned blob. Returns the downloaded filename. Shared by the
+// Export buttons and by the auto-generate path (when the question asked for a document).
+async function downloadExport(fmt, data, question) {
+  const r = await fetch("/api/export", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ format: fmt, question, answer: data }),
+  });
+  if (!r.ok) {
+    let msg = "Export failed";
+    try { const j = await r.json(); msg = j.error || msg; } catch {}
+    throw new Error(msg);
+  }
+  const blob = await r.blob();
+  const cd = r.headers.get("Content-Disposition") || "";
+  const m = cd.match(/filename="?([^"]+)"?/);
+  const name = m ? m[1] : `bayi-report.${fmt}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  return name;
+}
+
+// Export button click: download with an inline "…" progress state on the button.
 async function exportDoc(fmt, data, question, btn) {
   const prev = btn.textContent;
   btn.disabled = true; btn.textContent = "…";
   try {
-    const r = await fetch("/api/export", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format: fmt, question, answer: data }),
-    });
-    if (!r.ok) {
-      let msg = "Export failed";
-      try { const j = await r.json(); msg = j.error || msg; } catch {}
-      throw new Error(msg);
-    }
-    const blob = await r.blob();
-    const cd = r.headers.get("Content-Disposition") || "";
-    const m = cd.match(/filename="?([^"]+)"?/);
-    const name = m ? m[1] : `bayi-report.${fmt}`;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    await downloadExport(fmt, data, question);
   } catch (e) {
     alert("Could not export: " + (e && e.message ? e.message : e));
   } finally {
@@ -699,6 +717,14 @@ async function send() {
   busy = false; sendBtn.disabled = false;
   renderAll(); save();
   qEl.focus();
+
+  // The question asked for an office document — generate it from THIS grounded answer and
+  // start the download. Fires once here (not in renderAll), so reopening a saved chat does
+  // not re-download. The export bar still lets the user re-download or pick another format.
+  if (data.ok && data.export_format) {
+    downloadExport(data.export_format, data, question).catch((e) =>
+      alert("Could not generate the document: " + (e && e.message ? e.message : e)));
+  }
 }
 
 // Rasterize the whole thread (charts and tables included) and slice it into an

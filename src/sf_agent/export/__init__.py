@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from sf_agent.export.intent import detect_export_request
 from sf_agent.export.model import DocumentModel, Table, answer_to_document, humanize
 
 # fmt -> (file extension, MIME type). Drives both the renderer dispatch and the
@@ -65,6 +66,7 @@ __all__ = [
     "DocumentModel",
     "Table",
     "answer_to_document",
+    "detect_export_request",
     "humanize",
     "render_document",
     "FORMATS",
