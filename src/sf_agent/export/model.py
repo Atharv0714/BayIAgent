@@ -52,6 +52,18 @@ class Table(BaseModel):
     rows: list[list[Any]]
 
 
+class Slide(BaseModel):
+    """One slide of a generated deck: a title, bullet lines, and optional speaker notes.
+
+    Produced when the answer carries a ``values.slides`` array (the agent structures a deck
+    that way on a "make a presentation" request), so the pptx renderer emits one real slide
+    per entry instead of a single table."""
+
+    title: str
+    bullets: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+
 class DocumentModel(BaseModel):
     """Everything a renderer needs to lay out one answer, format-agnostic."""
 
@@ -63,6 +75,8 @@ class DocumentModel(BaseModel):
     # The plain-language answer summary shown at the top of the on-screen response.
     summary: str = ""
     tables: list[Table] = Field(default_factory=list)
+    # A deck, when the answer carried a `values.slides` array — one Slide per entry.
+    slides: list[Slide] = Field(default_factory=list)
     # The agent's normalized chart spec {type, title, labels, series, ...}, or None.
     chart: dict[str, Any] | None = None
     # Data tables the answer drew from, for a provenance footer.
@@ -116,6 +130,42 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def _parse_slides(v: Any) -> list[Slide]:
+    """Parse a ``values.slides`` array into Slides. Each entry is an object with a
+    ``title`` and ``content`` (a list of bullet strings, or a single string that is split
+    on newlines); ``notes``/``speaker_notes`` become the slide's speaker notes. Tolerant of
+    the field-name variants a model tends to emit."""
+    if not isinstance(v, list):
+        return []
+    slides: list[Slide] = []
+    for item in v:
+        if isinstance(item, str):
+            if item.strip():
+                slides.append(Slide(title=item.strip()))
+            continue
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("heading") or item.get("name") or "Slide").strip() or "Slide"
+        content = item.get("content")
+        if content is None:
+            content = item.get("bullets") or item.get("body") or item.get("points")
+        bullets: list[str] = []
+        if isinstance(content, list):
+            bullets = [cell_text(b).strip() for b in content if b not in (None, "")]
+        elif isinstance(content, str) and content.strip():
+            bullets = [ln.strip(" -•\t") for ln in content.splitlines() if ln.strip()] or [content.strip()]
+        notes = item.get("notes") or item.get("speaker_notes") or item.get("speakerNotes")
+        notes = str(notes).strip() if notes not in (None, "") else None
+        slides.append(Slide(title=title, bullets=bullets, notes=notes))
+    return slides
+
+
+def _is_slides_key(key: str, v: Any) -> bool:
+    """True when a `values` entry is a deck: the key is 'slides' and the value is a list of
+    slide objects (not, say, a numeric column that happens to be named 'slides')."""
+    return key.lower() == "slides" and isinstance(v, list) and any(isinstance(x, dict) for x in v)
+
+
 def answer_to_document(payload: dict[str, Any], question: str | None = None) -> DocumentModel:
     """Map an /api/ask answer payload into a DocumentModel.
 
@@ -133,10 +183,14 @@ def answer_to_document(payload: dict[str, Any], question: str | None = None) -> 
         headline = cell_text(value)
 
     tables: list[Table] = []
+    slides: list[Slide] = []
     scalar_details: list[list[Any]] = []
     values = payload.get("values") or {}
     if isinstance(values, dict):
         for key, v in values.items():
+            if _is_slides_key(key, v):
+                slides = _parse_slides(v)  # a deck, not a table
+                continue
             label = humanize(key)
             table = _value_to_table(label, v)
             if table is not None:
@@ -161,6 +215,7 @@ def answer_to_document(payload: dict[str, Any], question: str | None = None) -> 
         headline=headline,
         summary=str(payload.get("answer") or ""),
         tables=tables,
+        slides=slides,
         chart=chart,
         sources=[str(s) for s in sources],
     )

@@ -118,3 +118,53 @@ def test_unsupported_format_raises() -> None:
     model = answer_to_document(ANSWER, "q")
     with pytest.raises(ValueError):
         render_document(model, "rtf")
+
+
+# --- deck generation (values.slides -> real slides) ------------------------------------
+_DECK = {
+    "answer": "Here is the 3-slide deck. It is ready to download.",
+    "value": None,
+    "values": {
+        "slides": [
+            {"title": "Overview", "content": ["Point A", "Point B"], "speaker_notes": "intro"},
+            {"title": "Market", "content": ["TAM is large"]},
+            {"title": "Ask", "content": ["Partner with BayOne"], "speaker_notes": "close"},
+        ]
+    },
+}
+
+
+def test_slides_parse_into_deck_not_table():
+    m = answer_to_document(_DECK, "Make a deck")
+    assert len(m.slides) == 3
+    assert m.tables == []  # the slides array is a deck, not a generic table
+    assert m.slides[0].title == "Overview"
+    assert m.slides[0].bullets == ["Point A", "Point B"]
+    assert m.slides[0].notes == "intro"
+    assert m.slides[1].notes is None
+
+
+def test_slides_content_as_string_splits_to_bullets():
+    m = answer_to_document(
+        {"answer": "x", "values": {"slides": [{"title": "T", "content": "line one\nline two"}]}}, "q"
+    )
+    assert m.slides[0].bullets == ["line one", "line two"]
+
+
+def test_pptx_emits_one_slide_per_entry():
+    import io as _io
+
+    from pptx import Presentation
+
+    prs = Presentation(_io.BytesIO(render_document(answer_to_document(_DECK, "Make a deck"), "pptx")))
+    slides = list(prs.slides)
+    # title + summary + 3 content slides
+    assert len(slides) >= 4
+    # speaker notes carried onto the notes page
+    assert any(s.has_notes_slide and "intro" in s.notes_slide.notes_text_frame.text for s in slides)
+
+
+def test_slides_named_column_is_not_treated_as_a_deck():
+    # A numeric 'slides' value (not a list of slide objects) stays an ordinary value.
+    m = answer_to_document({"answer": "x", "value": 5, "values": {"slides": 5}}, "how many slides?")
+    assert m.slides == []

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from typing import Any
+from xml.sax.saxutils import escape as _esc
 
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.legends import Legend
@@ -169,7 +170,16 @@ def render(model: DocumentModel) -> bytes:
     if model.headline:
         story.append(Paragraph(f"<b>Answer:</b> {model.headline}", st["headline"]))
     if model.summary:
-        story.append(Paragraph(model.summary, st["body"]))
+        story.append(Paragraph(_esc(model.summary), st["body"]))
+
+    # A deck renders as one headed section per slide (bullets + speaker notes).
+    for i, s in enumerate(model.slides, start=1):
+        flow: list[Any] = [Paragraph(f"{i}. {_esc(s.title)}", st["h2"])]
+        for b in s.bullets:
+            flow.append(Paragraph("•&nbsp;&nbsp;" + _esc(b), st["body"]))
+        if s.notes:
+            flow.append(Paragraph("<i>Notes: " + _esc(s.notes) + "</i>", st["source"]))
+        story.append(KeepTogether(flow + [Spacer(1, 6)]))
 
     if model.chart:
         drawing = _chart_drawing(model.chart)

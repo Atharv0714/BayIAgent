@@ -146,6 +146,14 @@ def render(model: DocumentModel) -> bytes:
     for col in "BCDEF":
         summary.column_dimensions[col].width = 16
 
+    # A deck becomes a "Slides" sheet: one row per slide (bullets joined, notes alongside).
+    if model.slides:
+        rows = [
+            [i, s.title, "\n".join(s.bullets), s.notes or ""]
+            for i, s in enumerate(model.slides, start=1)
+        ]
+        _write_table_sheet(wb, "Slides", ["#", "Title", "Content", "Notes"], rows, used)
+
     for table in model.tables:
         _write_table_sheet(wb, table.name, table.columns, table.rows, used)
 

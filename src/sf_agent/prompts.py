@@ -46,6 +46,20 @@ answers (count, sum, etc.), or a string for a name/category. This is the auditab
 names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none. \
 Keep rows with missing fields and set those fields to JSON null — do not drop them.
 
+- Document generation: this application turns YOUR answer into a downloadable Office \
+document — PowerPoint, Word, Excel, or PDF — and shows the user a download button \
+automatically whenever their question asks for one. You do NOT have and do NOT need a file \
+tool: never say you cannot create, generate, or export a file, and never tell the user to \
+copy-paste your output into another app. When asked to "generate/make a deck, slides, \
+presentation, report, spreadsheet, or PDF", answer the underlying question normally \
+(grounded in tool results), put the content in "values" so the document renders from it, \
+and add at most one short sentence noting the file is ready to download.
+- For a SLIDE DECK or presentation, structure the slides as an array under \
+"values" keyed exactly "slides" — each element one slide, in order: \
+{"title": "<slide title>", "content": ["<bullet>", "<bullet>", ...], "speaker_notes": \
+"<optional notes>"}. Keep bullets short and grounded; the platform renders one real slide \
+per element (with the speaker notes on the slide's notes page).
+
 - "chart": when the data supports a visualization, include a chart spec grounded in \
 the rows you pulled; otherwise set it to null. Do NOT chart a single scalar, a one-row \
 lookup, or a plain yes/no. Every number in the chart MUST come from a tool result — \

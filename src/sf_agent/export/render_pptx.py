@@ -144,6 +144,23 @@ def _chart_slide(prs: Presentation, chart: dict[str, Any]) -> None:
     )
 
 
+def _content_slide(prs: Presentation, s) -> None:
+    """One deck slide: title + bullet body, with any speaker notes on the notes page."""
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _heading(slide, s.title)
+    if s.bullets:
+        box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(11.7), Inches(5.2))
+        tf = box.text_frame
+        tf.word_wrap = True
+        for i, b in enumerate(s.bullets):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.text = "•  " + b
+            p.font.size = Pt(18)
+            p.space_after = Pt(8)
+    if s.notes:
+        slide.notes_slide.notes_text_frame.text = s.notes
+
+
 def render(model: DocumentModel) -> bytes:
     prs = Presentation()
     prs.slide_width = Emu(int(_SLIDE_W))
@@ -151,6 +168,9 @@ def render(model: DocumentModel) -> bytes:
 
     _title_slide(prs, model)
     _summary_slide(prs, model)
+    # A deck: one real slide per entry (title + bullets + speaker notes).
+    for s in model.slides:
+        _content_slide(prs, s)
     if model.chart:
         _chart_slide(prs, model.chart)
     for table in model.tables:

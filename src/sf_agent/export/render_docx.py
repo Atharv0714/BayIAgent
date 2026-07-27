@@ -90,6 +90,18 @@ def render(model: DocumentModel) -> bytes:
     if model.summary:
         doc.add_paragraph(model.summary)
 
+    # A deck renders as one headed section per slide (bullets + speaker notes).
+    for i, s in enumerate(model.slides, start=1):
+        doc.add_heading(f"{i}. {s.title}", level=2)
+        for b in s.bullets:
+            doc.add_paragraph(b, style="List Bullet")
+        if s.notes:
+            np = doc.add_paragraph()
+            nr = np.add_run("Notes: " + s.notes)
+            nr.italic = True
+            nr.font.size = Pt(9)
+            nr.font.color.rgb = _MUTED
+
     if model.chart:
         ct = _chart_as_table(model.chart)
         if ct is not None:
