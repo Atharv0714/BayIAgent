@@ -611,7 +611,10 @@ async function downloadExport(fmt, data, question) {
   const a = document.createElement("a");
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  // Revoke LATER, not synchronously: revoking the object URL right after click() can
+  // cancel the still-starting download in some browsers and truncate the file (which
+  // then opens as "invalid format"). A delayed revoke lets the download finish first.
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
   return name;
 }
 
