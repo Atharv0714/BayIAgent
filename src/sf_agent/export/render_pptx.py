@@ -14,6 +14,7 @@ from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
@@ -162,9 +163,10 @@ def _content_slide(prs: Presentation, s) -> None:
 
 
 def render(model: DocumentModel, template: bytes | None = None) -> bytes:
-    # `template` (a user-uploaded .pptx/.potx) will render the deck onto that template's
-    # theme + layouts — implemented in the next chunk. For now it falls back to the
-    # built-in default deck so the plumbing is in place and callers work.
+    # A user-uploaded template renders onto ITS theme + layouts (branded, native).
+    if template:
+        return _render_on_template(model, template)
+
     prs = Presentation()
     prs.slide_width = Emu(int(_SLIDE_W))
     prs.slide_height = Emu(int(_SLIDE_H))
@@ -178,6 +180,133 @@ def render(model: DocumentModel, template: bytes | None = None) -> bytes:
         _chart_slide(prs, model.chart)
     for table in model.tables:
         _table_slide(prs, table)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+# ── Template mode ──────────────────────────────────────────────────────────────────────
+# Render onto the user's uploaded .pptx/.potx so the deck inherits its theme, master, and
+# slide layouts. Slides are built by populating the layout's own title/body PLACEHOLDERS
+# (so text picks up the template's fonts, colors, and positioning), with a textbox fallback
+# on the same branded layout when a placeholder is absent. Tables/charts — rare in a
+# "make a deck" answer, which produces bullet slides — are summarized as bullet slides so
+# they stay on-template and never overflow an unknown slide size.
+
+_TITLE_TYPES = {PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE}
+_BODY_TYPES = {PP_PLACEHOLDER.BODY, PP_PLACEHOLDER.OBJECT}
+_SUBTITLE_TYPES = {PP_PLACEHOLDER.SUBTITLE, PP_PLACEHOLDER.BODY}
+
+
+def _remove_all_slides(prs: Presentation) -> None:
+    """Drop the template's own sample slides, keeping its masters/layouts/theme."""
+    lst = prs.slides._sldIdLst
+    for sld in list(lst):
+        lst.remove(sld)
+
+
+def _ph_of_type(shapes_holder, types: set) -> Any:
+    for ph in shapes_holder.placeholders:
+        if ph.placeholder_format.type in types:
+            return ph
+    return None
+
+
+def _pick_layouts(prs: Presentation):
+    """Choose a title layout (title [+subtitle]) and a content layout (title + body) from
+    the template, with sensible fallbacks so any template yields something usable."""
+    layouts = list(prs.slide_layouts)
+    has_title = lambda l: _ph_of_type(l, _TITLE_TYPES) is not None  # noqa: E731
+    has_body = lambda l: _ph_of_type(l, _BODY_TYPES) is not None  # noqa: E731
+    has_sub = lambda l: _ph_of_type(l, {PP_PLACEHOLDER.SUBTITLE}) is not None  # noqa: E731
+    title_layout = (
+        next((l for l in layouts if has_title(l) and has_sub(l)), None)
+        or next((l for l in layouts if has_title(l)), None)
+        or layouts[0]
+    )
+    content_layout = (
+        next((l for l in layouts if has_title(l) and has_body(l)), None)
+        or next((l for l in layouts if has_body(l)), None)
+        or title_layout
+    )
+    return title_layout, content_layout
+
+
+def _fallback_textbox(prs: Presentation, slide, text: str, top) -> None:
+    box = slide.shapes.add_textbox(Inches(0.7), top, prs.slide_width - Inches(1.4), Inches(1.2))
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.text = text
+
+
+def _tpl_title_slide(prs: Presentation, layout, model: DocumentModel) -> None:
+    slide = prs.slides.add_slide(layout)
+    if slide.shapes.title is not None:
+        slide.shapes.title.text = model.title
+    subtitle = f"{model.subtitle} · {model.generated_on}"
+    if model.headline:
+        subtitle += f"\nAnswer: {model.headline}"
+    sub = _ph_of_type(slide, _SUBTITLE_TYPES)
+    if sub is not None:
+        sub.text_frame.text = subtitle
+    else:
+        _fallback_textbox(prs, slide, subtitle, top=Inches(4.2))
+
+
+def _tpl_content_slide(prs: Presentation, layout, title: str, bullets: list[str], notes: str | None = None) -> None:
+    slide = prs.slides.add_slide(layout)
+    if slide.shapes.title is not None:
+        slide.shapes.title.text = title
+    else:
+        _fallback_textbox(prs, slide, title, top=Inches(0.4))
+    body = _ph_of_type(slide, _BODY_TYPES)
+    if bullets and body is not None:
+        tf = body.text_frame
+        tf.clear()
+        for i, b in enumerate(bullets):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.text = b
+    elif bullets:
+        _fallback_textbox(prs, slide, "\n".join("•  " + b for b in bullets), top=Inches(1.6))
+    if notes:
+        slide.notes_slide.notes_text_frame.text = notes
+
+
+def _table_as_bullets(table: Table) -> list[str]:
+    """One bullet per row (col: value · col: value), capped — keeps it on-template."""
+    out: list[str] = []
+    for row in table.rows[:_MAX_ROWS]:
+        pairs = [f"{table.columns[i]}: {cell_text(v)}" for i, v in enumerate(row) if i < len(table.columns)]
+        out.append(" · ".join(pairs))
+    return out
+
+
+def _chart_as_bullets(chart: dict[str, Any]) -> list[str]:
+    labels, series = chart_series(chart)
+    if not labels or not series:
+        return []
+    _name, data = series[0]
+    return [f"{lab}: {data[i] if i < len(data) else ''}" for i, lab in enumerate(labels)]
+
+
+def _render_on_template(model: DocumentModel, template: bytes) -> bytes:
+    prs = Presentation(io.BytesIO(template))  # inherits the template's theme + layouts
+    _remove_all_slides(prs)
+    title_layout, content_layout = _pick_layouts(prs)
+
+    _tpl_title_slide(prs, title_layout, model)
+    if model.summary and not model.slides:
+        # Only add a stand-alone summary slide when there isn't already a deck of slides.
+        _tpl_content_slide(prs, content_layout, "Summary", [model.summary])
+    for s in model.slides:
+        _tpl_content_slide(prs, content_layout, s.title, s.bullets, notes=s.notes)
+    for table in model.tables:
+        _tpl_content_slide(prs, content_layout, table.name, _table_as_bullets(table))
+    if model.chart:
+        bullets = _chart_as_bullets(model.chart)
+        if bullets:
+            _tpl_content_slide(prs, content_layout, str(model.chart.get("title") or "Chart"), bullets)
 
     buf = io.BytesIO()
     prs.save(buf)
