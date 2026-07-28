@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from sf_agent.ingest import (
     IngestError,
     StructuredResult,
     coerce_for_validation,
+    file_content_block,
     stamp_sensitivity,
     structure_upload,
     tier_requirements,
@@ -101,9 +103,29 @@ class _State:
     # Per-owner enforcement config. Defaults keep today's behavior (no binding, all
     # rows shared) until the docs/sql migration is applied and ENFORCE_OWNERSHIP=true.
     auth_config: AuthConfig | None = None
+    # upload_id -> record for a file attached in the chat. `kind` is "template" (a
+    # .pptx/.potx carried to the renderer at export — record keeps "raw" bytes) or
+    # "context" (a doc the model reads — record keeps the prebuilt "block", not raw).
+    # In-memory, capped, per-process — like pending_ingests.
+    uploads: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
 
 STATE = _State()
+
+# Chat-attachment classification + retention. A PowerPoint upload is a DECK TEMPLATE
+# (used by the renderer, never sent to the model); anything else is CONTEXT the model
+# reads. Uploads are held in memory only, oldest evicted past these caps.
+_TEMPLATE_EXTS = {".pptx", ".potx"}
+_MAX_UPLOADS = 20
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file
+
+
+def _remember_upload(upload_id: str, record: dict[str, Any]) -> None:
+    """Store an upload record, evicting the oldest entries past the count cap (LRU-ish)."""
+    STATE.uploads[upload_id] = record
+    STATE.uploads.move_to_end(upload_id)
+    while len(STATE.uploads) > _MAX_UPLOADS:
+        STATE.uploads.popitem(last=False)
 
 
 def _caller_identity(request: Request) -> str | None:
@@ -323,11 +345,57 @@ class AskRequest(BaseModel):
     question: str
     tool: str = "run_sql"
     session_id: str | None = None
+    # A file attached to this turn (from /api/upload). A "context" upload's content is
+    # read by the model; a "template" upload is carried through to the deck export.
+    upload_id: str | None = None
 
 
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(_STATIC / "index.html")
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...)) -> JSONResponse:
+    """Accept one file attached in the chat and hold it server-side for this session.
+
+    Classifies it: a PowerPoint (.pptx/.potx) is a deck TEMPLATE (used by the renderer at
+    export, never sent to the model); anything else is CONTEXT the model reads (validated
+    here by trying to build its content block). Returns an upload_id the client passes to
+    /api/ask (context) and, for a template, on to /api/export.
+    """
+    filename = file.filename or "upload"
+    raw = await file.read()
+    if not raw:
+        return JSONResponse({"ok": False, "error": "The uploaded file is empty."}, status_code=400)
+    if len(raw) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"ok": False, "error": f"File is too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB)."},
+            status_code=413,
+        )
+
+    ext = Path(filename).suffix.lower()
+    if ext in _TEMPLATE_EXTS:
+        record: dict[str, Any] = {"filename": filename, "kind": "template", "raw": raw}
+    else:
+        # Context: build the model content block now (raises for unsupported types) so the
+        # user gets an immediate 415, and so an Office file is converted to PDF only once.
+        try:
+            block = file_content_block(filename, raw)
+        except IngestError as e:
+            status = 415 if "Unsupported file type" in str(e) else 422
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=status)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("web: upload processing failed for %r", filename)
+            return JSONResponse({"ok": False, "error": f"Could not read file: {e}"}, status_code=500)
+        record = {"filename": filename, "kind": "context", "block": block}
+
+    upload_id = uuid.uuid4().hex
+    with _LOCK:
+        _remember_upload(upload_id, record)
+    return JSONResponse(
+        {"ok": True, "upload_id": upload_id, "filename": filename, "kind": record["kind"]}
+    )
 
 
 @app.get("/ingest")
@@ -948,6 +1016,23 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             )
         is_protected = _caller_is_protected(request)
 
+    # Resolve an attached file. A "context" upload's prebuilt content block rides with the
+    # question so the model reads it; a "template" upload is carried through to the deck
+    # export (never sent to the model). Built outside _LOCK so any conversion doesn't hold
+    # the shared read connection.
+    attachments: list[dict[str, Any]] | None = None
+    template_id: str | None = None
+    if req.upload_id:
+        up = STATE.uploads.get(req.upload_id)
+        if up is None:
+            return JSONResponse(
+                {"ok": False, "error": "Attached file expired — re-attach it."}, status_code=400
+            )
+        if up.get("kind") == "template":
+            template_id = req.upload_id
+        elif up.get("block") is not None:
+            attachments = [up["block"]]
+
     # Continue an existing chat, or start a new one. History is kept server-side so a
     # follow-up ("now analyze that") sees the earlier turns and their fetched rows.
     session_id = req.session_id or uuid.uuid4().hex
@@ -964,9 +1049,10 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
                     auth.protected_session_var: "true" if is_protected else "false",
                 })
             history = STATE.conversations.get(session_id, [])
-            # route_and_answer classifies (database / followup / web) first, then
-            # dispatches — so the answer carries the route + reason for transparency.
-            answer, updated = agent.route_and_answer(history, question)
+            # route_and_answer classifies (database / followup / web / general) first, then
+            # dispatches — so the answer carries the route + reason for transparency. An
+            # attached context doc rides along as content blocks the model can read.
+            answer, updated = agent.route_and_answer(history, question, attachments=attachments)
             STATE.conversations[session_id] = updated
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
@@ -996,6 +1082,9 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             # UI which format so it auto-renders the file from THIS grounded answer via
             # /api/export — no re-query, no extra model call. None for ordinary questions.
             "export_format": detect_export_request(question),
+            # When a .pptx/.potx template was attached, echo its id so the UI passes it to
+            # /api/export and the deck renders onto that template. None otherwise.
+            "template_id": template_id,
         }
     )
 
@@ -1009,6 +1098,9 @@ class ExportRequest(BaseModel):
     # export is rendered from THIS grounded answer, so it never re-queries or re-invents
     # numbers; every figure in the document already came from a live query.
     answer: dict[str, Any] = {}
+    # For a pptx: the upload_id of an attached .pptx/.potx template (from /api/upload) to
+    # render the deck onto. Ignored for non-pptx formats and when the template has expired.
+    template_id: str | None = None
 
 
 def _export_slug(text: str) -> str:
@@ -1037,9 +1129,17 @@ def export(req: ExportRequest) -> Response:
     if not isinstance(req.answer, dict) or not req.answer:
         return JSONResponse({"ok": False, "error": "No answer to export."}, status_code=400)
 
+    # A pptx may render onto a user-uploaded template (its theme + layouts). Look it up by
+    # id; a missing/expired template just falls back to the built-in default deck.
+    template: bytes | None = None
+    if req.template_id and fmt == "pptx":
+        up = STATE.uploads.get(req.template_id)
+        if up is not None and up.get("kind") == "template":
+            template = up.get("raw")
+
     try:
         model = answer_to_document(req.answer, req.question)
-        data = render_document(model, fmt)
+        data = render_document(model, fmt, template=template)
     except Exception as e:  # noqa: BLE001 — surface render failures to the browser
         logger.exception("web: export failed fmt=%s", fmt)
         return JSONResponse({"ok": False, "error": f"Could not generate {fmt}: {e}"}, status_code=500)

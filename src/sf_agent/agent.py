@@ -254,6 +254,7 @@ class SnowflakeAgent:
         guidance: str | None = None,
         system: str = SYSTEM_PROMPT,
         use_tools: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
         """Answer `question` in the context of a prior message `history`.
 
@@ -271,10 +272,18 @@ class SnowflakeAgent:
         `use_tools=False` runs the model with NO query tools — a single-shot direct
         answer — reusing the same JSON contract, diagnostics, and recovery. Both keep
         the default (database) call path byte-for-byte unchanged.
+
+        `attachments`, when set, are Anthropic content blocks for an uploaded file the
+        user attached (a document to read); they ride alongside the question text.
         """
         start = time.perf_counter()
         messages: list[dict[str, Any]] = list(history)
-        messages.append({"role": "user", "content": question})
+        if attachments:
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": question}, *attachments]}
+            )
+        else:
+            messages.append({"role": "user", "content": question})
         if guidance:
             messages.append({"role": "user", "content": guidance})
         # No query tools in general mode; otherwise advertise them (cache the last spec).
@@ -402,7 +411,10 @@ class SnowflakeAgent:
         )
 
     def route_and_answer(
-        self, history: list[dict[str, Any]], question: str
+        self,
+        history: list[dict[str, Any]],
+        question: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
         """Classify the question, then answer it via the chosen route.
 
@@ -421,11 +433,13 @@ class SnowflakeAgent:
             # Ordinary-assistant lane: answer from the model's own knowledge, no query
             # tools, using the general system prompt (still the JSON contract, so decks work).
             answer, updated = self.converse(
-                history, question, system=GENERAL_SYSTEM, use_tools=False
+                history, question, system=GENERAL_SYSTEM, use_tools=False, attachments=attachments
             )
         else:
             guidance = FOLLOWUP_GUIDANCE if decision.route == ROUTE_FOLLOWUP else None
-            answer, updated = self.converse(history, question, guidance=guidance)
+            answer, updated = self.converse(
+                history, question, guidance=guidance, attachments=attachments
+            )
 
         answer.route = decision.route
         answer.route_reason = decision.reason

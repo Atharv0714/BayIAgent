@@ -38,15 +38,20 @@ FORMATS: dict[str, tuple[str, str]] = {
 SUPPORTED_FORMATS = tuple(FORMATS)
 
 
-def render_document(model: DocumentModel, fmt: str) -> bytes:
+def render_document(model: DocumentModel, fmt: str, template: bytes | None = None) -> bytes:
     """Render ``model`` to the requested format, returning the file's bytes.
 
     Renderers are imported lazily so the package (and the web app) still load when a
     single format's optional dependency is missing — only that format then fails.
+
+    ``template`` (a .pptx/.potx the user uploaded) is forwarded only to the pptx renderer,
+    which builds the deck onto that template's theme and layouts; other formats ignore it.
     """
     if fmt not in FORMATS:
         raise ValueError(f"unsupported export format {fmt!r}")
     renderer = _renderer(fmt)
+    if fmt == "pptx":
+        return renderer(model, template=template)
     return renderer(model)
 
 

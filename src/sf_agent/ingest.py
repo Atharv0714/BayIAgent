@@ -182,27 +182,23 @@ def _office_to_pdf(filename: str, raw: bytes) -> bytes:
         return pdf_path.read_bytes()
 
 
-def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
-    """Turn one uploaded file into Anthropic content blocks for the structuring call.
+def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
+    """One Anthropic content block for an uploaded file, so the model can read it.
 
-    Office files are first converted to PDF (via LibreOffice) and then take the PDF path.
-    Raises IngestError for unknown types, or when Office conversion isn't possible, so the
-    caller can return a clean 415/422.
+    Office files are converted to PDF (via LibreOffice) first and then take the PDF path;
+    PDFs become a `document` block, images an `image` block, text-family files a `text`
+    block. Raises IngestError for unknown types (or when Office conversion isn't possible).
+
+    Reused by two callers: the ingest structuring call (`build_content_block`) and the
+    chat's context-attachment path (an uploaded doc the user wants the assistant to read).
     """
     ext = Path(filename).suffix.lower()
     if ext in _OFFICE_EXTS:
         # Convert in place: the model still sees the original filename for provenance.
         raw = _office_to_pdf(filename, raw)
         ext = ".pdf"
-    instruction = {
-        "type": "text",
-        "text": (
-            f'Structure this per the contract. source_file="{filename}". Return JSON only.'
-        ),
-    }
-
     if ext in _PDF_EXTS:
-        source_block: dict[str, Any] = {
+        return {
             "type": "document",
             "source": {
                 "type": "base64",
@@ -210,8 +206,8 @@ def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
                 "data": base64.b64encode(raw).decode("ascii"),
             },
         }
-    elif ext in _IMAGE_MEDIA:
-        source_block = {
+    if ext in _IMAGE_MEDIA:
+        return {
             "type": "image",
             "source": {
                 "type": "base64",
@@ -219,14 +215,24 @@ def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
                 "data": base64.b64encode(raw).decode("ascii"),
             },
         }
-    elif ext in _TEXT_EXTS:
+    if ext in _TEXT_EXTS:
         text = raw.decode("utf-8", errors="replace")
-        source_block = {"type": "text", "text": f"Filename: {filename}\n\n{text}"}
-    else:
-        raise IngestError(
-            f"Unsupported file type '{ext or filename}' — convert to PDF and retry."
-        )
+        return {"type": "text", "text": f"Filename: {filename}\n\n{text}"}
+    raise IngestError(
+        f"Unsupported file type '{ext or filename}' — convert to PDF and retry."
+    )
 
+
+def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
+    """Turn one uploaded file into Anthropic content blocks for the structuring call:
+    the file itself plus the ingest instruction. Raises IngestError for unknown types."""
+    source_block = file_content_block(filename, raw)
+    instruction = {
+        "type": "text",
+        "text": (
+            f'Structure this per the contract. source_file="{filename}". Return JSON only.'
+        ),
+    }
     return [source_block, instruction]
 
 

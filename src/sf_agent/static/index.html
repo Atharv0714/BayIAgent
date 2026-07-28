@@ -176,6 +176,31 @@
 
   footer { border-top: 1px solid var(--border); background: var(--panel); }
   .composer { max-width: 820px; margin: 0 auto; padding: 14px 20px; display: flex; gap: 10px; align-items: flex-end; }
+  /* Attach control + the chip shown once a file is attached. */
+  #attachBtn {
+    flex: none; width: 44px; height: 46px; padding: 0; font-size: 18px; line-height: 1;
+    background: var(--panel2); border: 1px solid var(--vborder); border-radius: 10px;
+  }
+  #attachBtn:hover { border-color: var(--accent); }
+  #attachBtn.busy { opacity: .5; cursor: default; }
+  .attach-chip {
+    max-width: 820px; margin: 0 auto; padding: 0 20px 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .attach-pill {
+    display: inline-flex; align-items: center; gap: 8px; background: var(--panel2);
+    border: 1px solid var(--vborder); border-radius: 999px; padding: 5px 12px;
+    font-family: var(--display); font-weight: 600; font-size: 12.5px; color: var(--text); max-width: 100%;
+  }
+  .attach-pill .ap-kind {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #fff;
+    background: var(--bo-purple); border-radius: 6px; padding: 1px 6px; font-weight: 700;
+  }
+  .attach-pill .ap-kind.template { background: var(--bo-magenta); }
+  .attach-pill .ap-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+  .attach-pill .ap-x { border: 0; background: transparent; color: var(--muted); font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1; }
+  .attach-pill .ap-x:hover { color: var(--danger); }
+  /* A small attachment tag inside a user message bubble. */
+  .msg-attach { margin-top: 6px; font-size: 12px; color: var(--muted); }
   textarea {
     flex: 1; background: var(--panel2); color: var(--text); border: 1px solid var(--vborder);
     border-radius: 10px; padding: 11px 12px; font: inherit; resize: none; min-height: 46px; max-height: 180px;
@@ -241,11 +266,14 @@
     </main>
 
     <footer>
+      <div id="attachChip" class="attach-chip" style="display:none"></div>
       <div class="composer">
+        <input id="attachInput" type="file" hidden />
+        <button id="attachBtn" title="Attach a file (a PowerPoint template, or a document to read)">📎</button>
         <textarea id="q" rows="1" placeholder="Ask a question — then follow up to analyze the result…"></textarea>
         <button class="primary" id="send">Send</button>
       </div>
-      <div class="hint">Enter to send · Shift+Enter for newline · follow-ups keep the previous answer in context</div>
+      <div class="hint">Enter to send · Shift+Enter for newline · attach a .pptx template or a document to read</div>
     </footer>
   </div>
 </div>
@@ -253,6 +281,10 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
+const attachBtn = $("#attachBtn"), attachInput = $("#attachInput"), attachChip = $("#attachChip");
+// The file attached to the NEXT message: {upload_id, filename, kind} or null. kind is
+// "template" (a .pptx/.potx rendered onto at export) or "context" (a doc the model reads).
+let pendingUpload = null;
 // The agent always runs in Auto mode — it decides per question whether to use semantic
 // search (Cortex Analyst) or raw SQL — so there's no query-method picker in the UI.
 const TOOL = "auto";
@@ -596,7 +628,9 @@ function questionFor(idx) {
 async function downloadExport(fmt, data, question) {
   const r = await fetch("/api/export", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ format: fmt, question, answer: data }),
+    // template_id (when the answer was produced with an attached .pptx template) renders
+    // the deck onto that template; ignored server-side for non-pptx or when expired.
+    body: JSON.stringify({ format: fmt, question, answer: data, template_id: data.template_id || null }),
   });
   if (!r.ok) {
     let msg = "Export failed";
@@ -664,7 +698,10 @@ function renderMessage(m, idx) {
   const wrap = document.createElement("div");
   if (m.role === "user") {
     wrap.className = "msg user";
-    wrap.innerHTML = `<div class="bubble">${esc(m.text)}</div>`;
+    const att = m.attachment
+      ? `<div class="msg-attach">📎 ${esc(m.attachment.filename)}${m.attachment.kind === "template" ? " (template)" : ""}</div>`
+      : "";
+    wrap.innerHTML = `<div class="bubble">${esc(m.text)}${att}</div>`;
   } else {
     wrap.className = "msg bot" + (m.data && m.data.ok === false ? " err" : "");
     wrap.dataset.msgIndex = idx; // so the export buttons can find this answer's payload
@@ -692,14 +729,50 @@ function renderAll() {
   scrollDown();
 }
 
+// --- File attachment ----------------------------------------------------------------
+// Show (or clear) the pending-attachment chip above the composer.
+function renderAttachChip() {
+  if (!pendingUpload) { attachChip.style.display = "none"; attachChip.innerHTML = ""; return; }
+  const isTpl = pendingUpload.kind === "template";
+  attachChip.style.display = "";
+  attachChip.innerHTML = `<span class="attach-pill">`
+    + `<span class="ap-kind ${isTpl ? "template" : ""}">${isTpl ? "Template" : "Context"}</span>`
+    + `<span class="ap-name">${esc(pendingUpload.filename)}</span>`
+    + `<button class="ap-x" title="Remove attachment">×</button></span>`;
+}
+function clearAttach() { pendingUpload = null; attachInput.value = ""; renderAttachChip(); }
+
+// Upload a chosen file: the server classifies it (template vs context) and holds it,
+// returning an upload_id the next send() references.
+async function uploadFile(file) {
+  if (!file || busy) return;
+  attachBtn.classList.add("busy"); attachBtn.disabled = true;
+  try {
+    const fd = new FormData(); fd.append("file", file);
+    const r = await fetch("/api/upload", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || "Upload failed");
+    pendingUpload = { upload_id: data.upload_id, filename: data.filename, kind: data.kind };
+    renderAttachChip();
+  } catch (e) {
+    alert("Could not attach file: " + (e && e.message ? e.message : e));
+    clearAttach();
+  } finally {
+    attachBtn.classList.remove("busy"); attachBtn.disabled = false;
+  }
+}
+
 async function send() {
   const question = qEl.value.trim();
   if (!question || busy) return;
   busy = true; sendBtn.disabled = true;
+  // Take this turn's attachment (if any) and clear the composer chip.
+  const attach = pendingUpload;
+  clearAttach();
   // Give the chat a stable id up front so it can be saved before the server replies.
   // We pass it as session_id; the backend adopts a client-supplied id as-is.
   if (!sessionId) sessionId = newId();
-  messages.push({ role: "user", text: question });
+  messages.push({ role: "user", text: question, attachment: attach || null });
   qEl.value = ""; autosize();
   renderAll(); save();
 
@@ -713,7 +786,7 @@ async function send() {
   try {
     const r = await fetch("/api/ask", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, tool: TOOL, session_id: sessionId }),
+      body: JSON.stringify({ question, tool: TOOL, session_id: sessionId, upload_id: attach ? attach.upload_id : null }),
     });
     data = await r.json();
     if (data.session_id) sessionId = data.session_id;
@@ -786,6 +859,9 @@ function newChat() {
 function autosize() { qEl.style.height = "auto"; qEl.style.height = Math.min(qEl.scrollHeight, 180) + "px"; }
 
 sendBtn.addEventListener("click", send);
+attachBtn.addEventListener("click", () => { if (!busy) attachInput.click(); });
+attachInput.addEventListener("change", () => { if (attachInput.files[0]) uploadFile(attachInput.files[0]); });
+attachChip.addEventListener("click", (e) => { if (e.target.classList.contains("ap-x")) clearAttach(); });
 newChatBtn.addEventListener("click", newChat);
 $("#newChatSide").addEventListener("click", newChat);
 $("#chatList").addEventListener("click", (e) => {

@@ -161,7 +161,10 @@ def _content_slide(prs: Presentation, s) -> None:
         slide.notes_slide.notes_text_frame.text = s.notes
 
 
-def render(model: DocumentModel) -> bytes:
+def render(model: DocumentModel, template: bytes | None = None) -> bytes:
+    # `template` (a user-uploaded .pptx/.potx) will render the deck onto that template's
+    # theme + layouts — implemented in the next chunk. For now it falls back to the
+    # built-in default deck so the plumbing is in place and callers work.
     prs = Presentation()
     prs.slide_width = Emu(int(_SLIDE_W))
     prs.slide_height = Emu(int(_SLIDE_H))
