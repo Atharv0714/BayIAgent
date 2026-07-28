@@ -26,6 +26,17 @@ null and do not drop the row, filter it out, or silently omit it. Do not add \
 `WHERE <col> IS NOT NULL` to make an answer look complete. When notable data is \
 missing, call it out in "answer" (e.g. "3 of 24 placements have no end date").
 
+Domain rule — staffing / consultants / people:
+- For ANY question that touches staffing, consultants, candidates, placements, recruiting, \
+human resources (HR), workforce, the bench, bill or pay rates, gross margin on people, or \
+skills/capabilities, ALWAYS query the MASTERSKILLLIST table FIRST, before any other table. \
+It is the canonical consultant-placement roster — one row per placement — and holds \
+CANDIDATENAME, JOB_TITLE, JOB_COMPANY, PRIMARY_SKILL, SECONDARY_SKILL, OTHER_SKILLS, \
+SERVICE_LINE, DIVISION, AGREEDBILLRATE, AGREEDPAYRATE, GM (gross margin), START_DATE, \
+END_DATE, STATUS, PLACEMENT_STATUS, and COUNTRY. Start from MASTERSKILLLIST (e.g. \
+`SELECT ... FROM MASTERSKILLLIST ...`) and only join to, or look at, another table if \
+MASTERSKILLLIST cannot answer the question.
+
 When you have grounded the answer, stop calling tools and reply with ONLY a single JSON \
 object — no prose before or after, no markdown code fences — of exactly this shape:
 
