@@ -10,8 +10,8 @@ from urllib.parse import urlparse
 import anthropic
 
 from sf_agent.config import AgentConfig
-from sf_agent.prompts import FOLLOWUP_GUIDANCE, SYSTEM_PROMPT, WEB_SYSTEM
-from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_WEB, classify, usage_from
+from sf_agent.prompts import FOLLOWUP_GUIDANCE, GENERAL_SYSTEM, SYSTEM_PROMPT, WEB_SYSTEM
+from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_GENERAL, ROUTE_WEB, classify, usage_from
 from sf_agent.tools.base import Tool
 from sf_agent.types import AgentAnswer, ToolResult
 
@@ -252,6 +252,8 @@ class SnowflakeAgent:
         history: list[dict[str, Any]],
         question: str,
         guidance: str | None = None,
+        system: str = SYSTEM_PROMPT,
+        use_tools: bool = True,
     ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
         """Answer `question` in the context of a prior message `history`.
 
@@ -264,20 +266,25 @@ class SnowflakeAgent:
 
         `guidance`, when set, is appended as an extra user turn before the loop runs —
         the router uses it to nudge a follow-up toward answering from context.
+
+        `system` overrides the system prompt (e.g. GENERAL_SYSTEM for the general lane).
+        `use_tools=False` runs the model with NO query tools — a single-shot direct
+        answer — reusing the same JSON contract, diagnostics, and recovery. Both keep
+        the default (database) call path byte-for-byte unchanged.
         """
         start = time.perf_counter()
         messages: list[dict[str, Any]] = list(history)
         messages.append({"role": "user", "content": question})
         if guidance:
             messages.append({"role": "user", "content": guidance})
-        tool_specs = [_tool_spec(t) for t in self._tools.values()]
-        # Cache the tool specs (they never change across rounds) by marking the last one.
+        # No query tools in general mode; otherwise advertise them (cache the last spec).
+        tool_specs = [_tool_spec(t) for t in self._tools.values()] if use_tools else []
         cached_tool_specs = [dict(s) for s in tool_specs]
         if cached_tool_specs:
             cached_tool_specs[-1] = {**cached_tool_specs[-1], "cache_control": dict(_CACHE_CONTROL)}
         # System prompt is identical every round — cache it too.
         cached_system = [
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": dict(_CACHE_CONTROL)}
+            {"type": "text", "text": system, "cache_control": dict(_CACHE_CONTROL)}
         ]
         executed_sql: list[str] = []
         # Only successful, non-discovery queries — used to report the real data source
@@ -288,11 +295,13 @@ class SnowflakeAgent:
         # max_rounds query rounds + 1 final round where tools are withheld so the
         # model is forced to answer (guarantees termination).
         for round_i in range(self._config.max_rounds + 1):
-            allow_tools = round_i < self._config.max_rounds
+            allow_tools = use_tools and round_i < self._config.max_rounds
 
-            # On the final (tool-withheld) round, explicitly demand the JSON answer;
-            # otherwise the model tends to summarize in prose and lose the value.
-            if not allow_tools:
+            # On the final (tool-withheld) round of a TOOL loop, explicitly demand the JSON
+            # answer; otherwise the model tends to summarize in prose and lose the value.
+            # Skipped in general mode (use_tools=False): its system prompt already asks for
+            # JSON, and the "using only the data gathered above" wording would be wrong.
+            if not allow_tools and use_tools:
                 messages.append({"role": "user", "content": _FINAL_ANSWER_INSTRUCTION})
 
             # Roll the conversation cache breakpoint to the current last message so
@@ -399,15 +408,21 @@ class SnowflakeAgent:
 
         This is the entry point the web UI uses (the evals still call `converse`
         directly, so their grounded-SQL behavior is unchanged). The route — database,
-        followup, or web — plus the router's one-line reason are recorded on the answer
-        so the UI can show how each question was handled, and the router's token cost is
-        folded into the answer's diagnostics.
+        followup, web, or general — plus the router's one-line reason are recorded on the
+        answer so the UI can show how each question was handled, and the router's token cost
+        is folded into the answer's diagnostics.
         """
         decision, router_usage = classify(
             self._client, self._config.model, question, bool(history)
         )
         if decision.route == ROUTE_WEB:
             answer, updated = self._answer_web(history, question)
+        elif decision.route == ROUTE_GENERAL:
+            # Ordinary-assistant lane: answer from the model's own knowledge, no query
+            # tools, using the general system prompt (still the JSON contract, so decks work).
+            answer, updated = self.converse(
+                history, question, system=GENERAL_SYSTEM, use_tools=False
+            )
         else:
             guidance = FOLLOWUP_GUIDANCE if decision.route == ROUTE_FOLLOWUP else None
             answer, updated = self.converse(history, question, guidance=guidance)
