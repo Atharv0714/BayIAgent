@@ -1,16 +1,18 @@
 """Up-front query router: classify a question before the agent runs it.
 
-Every question is tagged as one of three routes so the assistant is transparent about
+Every question is tagged as one of four routes so the assistant is transparent about
 how it answered — and so it can honor that choice:
 
-- ``database``  -> query the Snowflake warehouse (the grounded default)
+- ``database``  -> query the Snowflake warehouse (grounded in live results)
 - ``followup``  -> answer from the previous turn's already-fetched data
 - ``web``       -> search the open internet (answer carries source citations)
+- ``general``   -> answer from the assistant's own knowledge/reasoning (no data, no
+                   search) — general knowledge, drafting, brainstorming, explanations
 
-The classifier is a single small Claude call (biased toward ``database`` when unsure,
-since that path is always grounded). Kept in its own module so ``agent.py`` depends on a
-tiny, testable surface — ``classify`` and the route constants — rather than inlining the
-routing logic into the tool loop that the evals exercise directly.
+The classifier is a single small model call (biased toward ``database`` when a question
+plausibly needs internal data, since that path is grounded). Kept in its own module so
+``agent.py`` depends on a tiny, testable surface — ``classify`` and the route constants —
+rather than inlining the routing logic into the tool loop that the evals exercise directly.
 """
 
 from __future__ import annotations
@@ -25,7 +27,8 @@ from sf_agent.prompts import ROUTER_SYSTEM
 ROUTE_DATABASE = "database"
 ROUTE_FOLLOWUP = "followup"
 ROUTE_WEB = "web"
-_VALID_ROUTES = {ROUTE_DATABASE, ROUTE_FOLLOWUP, ROUTE_WEB}
+ROUTE_GENERAL = "general"
+_VALID_ROUTES = {ROUTE_DATABASE, ROUTE_FOLLOWUP, ROUTE_WEB, ROUTE_GENERAL}
 
 
 class RouteDecision(BaseModel):
