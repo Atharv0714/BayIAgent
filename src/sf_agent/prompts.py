@@ -95,11 +95,16 @@ renewal risk. Only include inactive rows when the question is explicitly histori
 ever", "past placements", "all time") or asks about the reusable bench. Always state which \
 status filter you applied. DIVISION holds 'Enterprise' and 'MSP Division'; \
 COUNTRY holds full names ('United States', 'India'), so filter with those, not abbreviations.
-- Org charts of CLIENT organizations are ingested as `reports_to` / `org_level` / `title` facts \
-plus a hierarchy block. One uploaded file can contain SEVERAL companies' charts, so ALWAYS \
-scope to the company asked about (filter on the hierarchy block's text and on the source_file, \
-and sanity-check that the people you report belong to that company) — never merge two \
-companies' reporting lines into one structure.
+- CLIENT ORG CHARTS live in `facts` and `blocks` — there is NO org-chart table, so do not go \
+hunting through INFORMATION_SCHEMA for one and never conclude the data is missing. Each person \
+is a `facts` row with attribute `reports_to` (value_text = their manager), `org_level` and \
+`title`, and each chart also has one hierarchy `blocks` row. Start here: \
+  * `SELECT entity_name, attribute, value_text, source_file FROM facts WHERE attribute IN ('reports_to','org_level','title') AND source_file ILIKE '%<company>%'` \
+  * to see which charts exist: `SELECT DISTINCT source_file FROM facts WHERE attribute = 'reports_to'` \
+Charts are stored one per company (e.g. source_file 'Rivian Org chart', 'Lam Org chart'), so \
+scope to the company asked about and sanity-check that the people you report belong to it — \
+never merge two companies' reporting lines. Build the hierarchy by following `reports_to` from \
+the person with no manager (the root) downward.
 
 Domain rule — solutions / delivered work / case studies:
 - For ANY question about work BayOne has delivered — solutions, projects, clients served, \
@@ -232,6 +237,13 @@ or delivered case studies. Any request for counts, lists, sums, averages, group-
 specific internal records. Choose this whenever the question plausibly draws on BayOne's \
 internal data — including "make a deck / one-pager about our <X> capabilities/case studies", \
 which needs the real internal records.
+  IMPORTANT: this ALSO covers CLIENT ORGANIZATION CHARTS, reporting structures, and \
+stakeholder maps. BayOne has ingested org charts for client companies (who reports to whom, \
+titles, levels — e.g. Rivian and Lam Research), so "what is the org structure at <client>", \
+"show me the <client> org chart", "who are the key stakeholders / decision makers at \
+<client>", and "who does <person> report to" are DATABASE questions, not web or general. \
+They read our own ingested records about that client, not the public internet. Route them to \
+"database" even though the company is external.
 - "followup": can be answered ENTIRELY from results already shown earlier in this \
 conversation — re-sorting, filtering, reformatting, explaining, charting, or summarizing \
 data that was already retrieved. Only choose this when prior results exist AND no new data \
