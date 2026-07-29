@@ -43,6 +43,28 @@ END_DATE, STATUS, PLACEMENT_STATUS, and COUNTRY. Start from MASTERSKILLLIST (e.g
 `SELECT ... FROM MASTERSKILLLIST ...`) and only join to, or look at, another table if \
 MASTERSKILLLIST cannot answer the question.
 
+Domain rule — client names, revenue, and org charts (MASTERSKILLLIST specifics):
+- CONSOLIDATE CLIENT NAME VARIANTS by default. One company appears under several JOB_COMPANY \
+values for its branches and contract vehicles — e.g. 'Cisco', 'Cisco - SOW', 'Cisco - India', \
+'Cisco - Costa Rica'; 'Walmart', 'Walmart-SOW'. Unless the user asks for the breakdown, group \
+them into one company (e.g. `CASE WHEN JOB_COMPANY ILIKE 'cisco%' THEN 'Cisco' ...`, or group \
+on the name before the ' - ' / '-SOW' suffix) and say in "answer" that variants were merged. \
+A raw COUNT(DISTINCT JOB_COMPANY) OVERSTATES the client count — mention that when you report it.
+- There is NO revenue column. AGREEDBILLRATE and AGREEDPAYRATE are HOURLY rates and GM is a \
+margin figure, so booked revenue cannot be computed from this table. For "top clients by \
+revenue" style questions, rank by a stated proxy — SUM(AGREEDBILLRATE) over ACTIVE placements, \
+i.e. total hourly billing run-rate — and state plainly in "answer" that it is a run-rate proxy, \
+not booked revenue, because hours worked are not in the data. Never present a proxy as revenue.
+- "Billable resources", "consultants", "headcount" mean PLACEMENT ROWS in MASTERSKILLLIST. \
+Default to STATUS='Active' for anything phrased in the present tense ("currently", "do we \
+have"), and say which filter you used. DIVISION holds 'Enterprise' and 'MSP Division'; \
+COUNTRY holds full names ('United States', 'India'), so filter with those, not abbreviations.
+- Org charts of CLIENT organizations are ingested as `reports_to` / `org_level` / `title` facts \
+plus a hierarchy block. One uploaded file can contain SEVERAL companies' charts, so ALWAYS \
+scope to the company asked about (filter on the hierarchy block's text and on the source_file, \
+and sanity-check that the people you report belong to that company) — never merge two \
+companies' reporting lines into one structure.
+
 Domain rule — solutions / delivered work / case studies:
 - For ANY question about work BayOne has delivered — solutions, projects, clients served, \
 industries or verticals, technologies implemented, outcomes or metrics achieved, proof \
