@@ -214,10 +214,24 @@ class AgentConfig(BaseSettings):
         default="claude-sonnet-4-6", validation_alias="INGEST_VISION_MODEL"
     )
 
+    # ── live web search ──────────────────────────────────────────────────────────────
+    # Anthropic's server-side web_search tool is SILENTLY IGNORED on Z.AI's compatible
+    # endpoint, so the web route answered from training data with no citations. Z.AI does
+    # support live search, but only via its native Completions API — this is that URL.
+    zai_search_url: str = Field(
+        default="https://api.z.ai/api/paas/v4/chat/completions",
+        validation_alias="ZAI_SEARCH_URL",
+    )
+
     @property
     def vision_enabled(self) -> bool:
         """True when a separate document-vision provider is configured."""
         return bool(self.vision_api_key)
+
+    @property
+    def uses_zai_search(self) -> bool:
+        """True when the main provider is Z.AI, whose live search needs its native API."""
+        return "z.ai" in (self.base_url or "").lower()
 
     @field_validator("vision_api_key", "vision_base_url", mode="before")
     @classmethod

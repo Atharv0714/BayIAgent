@@ -14,6 +14,7 @@ from sf_agent.prompts import FOLLOWUP_GUIDANCE, GENERAL_SYSTEM, SYSTEM_PROMPT, W
 from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_GENERAL, ROUTE_WEB, classify, usage_from
 from sf_agent.tools.base import Tool
 from sf_agent.types import AgentAnswer, ToolResult
+from sf_agent.web_search import WebSearchError, zai_search_answer
 
 logger = logging.getLogger("sf_agent.agent")
 
@@ -457,7 +458,12 @@ class SnowflakeAgent:
         traceable. History is persisted as plain text turns (not the raw server-tool
         blocks), so a later database turn can replay the conversation without needing
         the web tool re-declared.
+
+        Provider-aware: Z.AI ignores the Anthropic server-side tool entirely (answering from
+        training data with no citations), so that provider is routed to its native search API.
         """
+        if self._config.uses_zai_search:
+            return self._answer_web_zai(history, question)
         start = time.perf_counter()
         usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         messages: list[dict[str, Any]] = list(history)
@@ -543,4 +549,71 @@ class SnowflakeAgent:
         updated.append({"role": "user", "content": question})
         updated.append({"role": "assistant", "content": text or "(no answer)"})
         logger.info("web answered chars=%d citations=%d", len(text), len(citations))
+        return answer, updated
+
+    def _answer_web_zai(
+        self, history: list[dict[str, Any]], question: str
+    ) -> tuple[AgentAnswer, list[dict[str, Any]]]:
+        """Web route for Z.AI, using its native search API (see sf_agent.web_search).
+
+        Returns cited prose exactly like the Anthropic path. If the live search cannot run,
+        this says so instead of answering from the model's own knowledge — an uncited answer
+        that looks researched is the failure mode this whole path exists to prevent.
+        """
+        start = time.perf_counter()
+        # Replay only plain-text turns; the search API takes simple role/content messages.
+        msgs: list[dict[str, str]] = []
+        for m in history:
+            content = m.get("content")
+            if isinstance(content, str) and m.get("role") in ("user", "assistant"):
+                msgs.append({"role": str(m["role"]), "content": content})
+        msgs.append({"role": "user", "content": question})
+
+        try:
+            text, citations, usage = zai_search_answer(
+                api_key=self._config.api_key,
+                model=self._config.model,
+                url=self._config.zai_search_url,
+                messages=msgs,
+                system=WEB_SYSTEM,
+                max_tokens=self._config.max_tokens,
+                max_results=max(self._config.web_search_max_uses, 10),
+            )
+        except WebSearchError as e:
+            logger.warning("zai web search failed q=%r err=%s", question, e)
+            answer = AgentAnswer(
+                answer=(
+                    "I could not run a live web search just now "
+                    f"({e}), so I have not answered from unverified memory. "
+                    "Please retry, or ask me to use the internal data instead."
+                ),
+                value=None,
+                executed_sql=[],
+            )
+            answer.elapsed_ms = (time.perf_counter() - start) * 1000
+            return answer, history  # don't persist a failed turn
+
+        domains: list[str] = []
+        for c in citations:
+            host = urlparse(c["url"]).netloc or c["url"]
+            if host not in domains:
+                domains.append(host)
+
+        answer = AgentAnswer(
+            answer=text,
+            value=None,
+            values={},
+            executed_sql=[],
+            chart=None,
+            citations=citations,
+            sources=domains,
+        )
+        answer.elapsed_ms = (time.perf_counter() - start) * 1000
+        answer.tokens = {**usage, "total": sum(usage.values())}
+        answer.cost_usd = _estimate_cost(usage, self._config.model)
+
+        updated = list(history)
+        updated.append({"role": "user", "content": question})
+        updated.append({"role": "assistant", "content": text})
+        logger.info("zai web answered chars=%d citations=%d", len(text), len(citations))
         return answer, updated
