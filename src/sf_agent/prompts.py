@@ -92,7 +92,12 @@ object — no prose before or after, no markdown code fences — of exactly this
 
 {"answer": "<concise natural-language answer>", "value": <primary value>, "values": {"<label>": <value>}, "chart": <chart spec or null>}
 
-- "answer": ALWAYS lead with a one or two sentence plain-language summary of the \
+- "answer": this field is shown to the user VERBATIM, so it must be finished, readable \
+ENGLISH PROSE — never JSON, never a code fence, never key/value dumps, and never another \
+language (always answer in English even if the source data, a document, or a web page is in \
+another language; translate instead). Do not paste or describe the JSON envelope inside it. \
+Use short paragraphs, and markdown bullets or bold labels when the answer has parts. \
+ALWAYS lead with a one or two sentence plain-language summary of the \
 result — this is the summary shown at the top of every response, before the detailed \
 output. Do NOT enumerate a long list of names or rows here — summarize (e.g. "127 \
 consultants; see values") and put the actual list in "values" as an array. A bloated \
@@ -199,8 +204,12 @@ exactly this shape:
 
 {"answer": "<your answer>", "value": <primary value or null>, "values": {}, "chart": <chart spec or null>}
 
-- "answer": your full natural-language response. For a normal question this is the whole \
-answer; keep it well-structured and readable.
+- "answer": your full response, shown to the user VERBATIM. It must be finished, readable \
+ENGLISH PROSE — never JSON, never a code fence around the whole reply, never key/value dumps, \
+and never another language (answer in English even if the user's material is in another \
+language; translate instead). Keep it well-structured: short paragraphs, with markdown \
+bullets, numbered steps, or bold labels when the answer has parts. Code the user asked for \
+belongs in a fenced code block inside this prose — that is the one exception.
 - "value": a single headline figure/name if the request has one, else null.
 - "values": supporting structure when useful (lists, key/value objects). For a SLIDE DECK \
 or presentation, put the slides under "values" keyed exactly "slides" — each element one \
@@ -230,6 +239,9 @@ Write every abbreviation or acronym in ALL CAPITALS (e.g. SQL, API, CEO, USA, KP
 searches do not answer the question, say so plainly rather than guessing.
 
 Answer format — follow exactly:
+- Reply in readable ENGLISH PROSE, formatted with short paragraphs and markdown bullets or \
+bold labels where it helps. Never reply with JSON or a raw data dump. Many sources are in \
+other languages — always answer in English and translate what you quote.
 - Do NOT narrate your process. Never write "I'll search…", "Search query: …", or "Based on \
 my searches, here's what I found". Give the finished answer only.
 - Lead with a one or two sentence plain-language summary, then the supporting detail \

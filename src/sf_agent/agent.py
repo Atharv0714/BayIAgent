@@ -194,6 +194,48 @@ def _mark_cache_breakpoint(messages: list[dict[str, Any]]) -> None:
         content[-1]["cache_control"] = dict(_CACHE_CONTROL)
 
 
+def prose_only(text: str) -> str:
+    """Strip machine formatting so only readable prose reaches the user.
+
+    The `answer` field is rendered verbatim in the UI, so anything JSON-shaped that lands in
+    it is a visible bug. Two ways it happens: the model prefixes its JSON with commentary and
+    the whole blob fails to parse (the raw text then becomes the answer), or it nests another
+    JSON object inside `answer`. Both have been observed. This removes code fences and any
+    embedded JSON object — preferring that object's own "answer" field when it has one, since
+    that is the real message — and never returns an empty string.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    # Drop markdown code fences, keeping their contents for the checks below.
+    s = re.sub(r"```(?:json)?\s*", "", s).replace("```", "").strip()
+
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1:
+        # `end < start` means the object is TRUNCATED (a max_tokens cutoff mid-JSON) — still
+        # JSON noise that must not be shown, so treat the rest of the string as the blob.
+        blob = s[start : end + 1] if end > start else s[start:]
+        inner = None
+        try:
+            parsed = json.loads(blob)
+            if isinstance(parsed, dict):
+                inner = parsed.get("answer")
+        except json.JSONDecodeError:
+            # Unparseable or truncated: pull out an "answer": "..." if one is present.
+            m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', blob)
+            if m:
+                inner = m.group(1).encode().decode("unicode_escape", errors="replace")
+        if isinstance(inner, str) and inner.strip():
+            return prose_only(inner) if "{" in inner else inner.strip()
+        # No usable inner answer — keep only the prose surrounding the blob.
+        tail = s[end + 1 :] if end > start else ""
+        s = (s[:start] + " " + tail).strip()
+
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return s
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     """Pull the outermost JSON object out of the model's final message.
 
@@ -377,7 +419,9 @@ class SnowflakeAgent:
                     messages.append({"role": "user", "content": _PROTOCOL_REMINDER})
                     continue
                 answer = AgentAnswer(
-                    answer=text.strip() or "The agent could not produce an answer.",
+                    # Never surface the raw reply: it is often prose wrapped around a JSON
+                    # blob, which would render as machine output to the user.
+                    answer=prose_only(text) or "The agent could not produce an answer.",
                     value=None,
                     values={},
                     executed_sql=executed_sql,
@@ -391,7 +435,9 @@ class SnowflakeAgent:
 
             chart = data.get("chart")
             answer = AgentAnswer(
-                answer=str(data.get("answer", "")),
+                # Guard the happy path too: models sometimes nest a JSON object inside the
+                # answer field, which the UI would render as-is.
+                answer=prose_only(str(data.get("answer", ""))),
                 value=data.get("value"),
                 values=data.get("values") or {},
                 executed_sql=executed_sql,
@@ -531,7 +577,7 @@ class SnowflakeAgent:
                 domains.append(host)
 
         answer = AgentAnswer(
-            answer=text or "The web search returned no usable answer.",
+            answer=prose_only(text) or "The web search returned no usable answer.",
             value=None,
             values={},
             executed_sql=[],
@@ -600,7 +646,7 @@ class SnowflakeAgent:
                 domains.append(host)
 
         answer = AgentAnswer(
-            answer=text,
+            answer=prose_only(text),
             value=None,
             values={},
             executed_sql=[],
