@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+import anyio.to_thread
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ValidationError
@@ -266,26 +267,55 @@ async def lifespan(app: FastAPI):
     if os.environ.get("ANTHROPIC_API_KEY", "").strip() == "":
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
+    # The key and the endpoint must travel TOGETHER: a key from .env paired with a base URL
+    # inherited from the shell means the key is sent to the wrong provider, which fails as an
+    # opaque "401 invalid x-api-key" on the first call (not at startup). This bites whenever a
+    # login shell exports ANTHROPIC_BASE_URL (e.g. pointing at Anthropic) while .env selects a
+    # different provider such as Z.AI. When the environment supplies a base URL but NOT a key,
+    # its base URL is stale — drop it so .env is authoritative for both halves of the pair.
+    if os.environ.get("ANTHROPIC_BASE_URL", "").strip() and "ANTHROPIC_API_KEY" not in os.environ:
+        stale = os.environ.pop("ANTHROPIC_BASE_URL")
+        logger.warning(
+            "web: ignoring ANTHROPIC_BASE_URL=%s from the environment (no matching "
+            "ANTHROPIC_API_KEY there); using the provider configured in .env instead",
+            stale,
+        )
+
     try:
         agent_config = AgentConfig()  # type: ignore[call-arg]
     except ValidationError as e:
         STATE.connection.close()
         raise RuntimeError(f"ANTHROPIC_API_KEY missing; agent cannot start ({e}).") from e
 
+    # Log the resolved provider so a misrouted key is obvious at startup, not at first call.
+    logger.info(
+        "web: LLM endpoint=%s model=%s",
+        agent_config.base_url or "https://api.anthropic.com (default)",
+        agent_config.model,
+    )
+
     # run_sql is always available once the connection is up.
     run_sql_tool = RunSqlTool(STATE.connection)
     STATE.agents["run_sql"] = SnowflakeAgent(tools=[run_sql_tool], config=agent_config)
 
-    # cortex_analyst is optional — only if a PAT + semantic view are configured.
+    # cortex_analyst is optional — only if a PAT + semantic view are configured AND
+    # CORTEX_ENABLED isn't turned off. Disabled (or misconfigured) -> "auto" uses run_sql
+    # only, so no Cortex Analyst per-message charges and no failed round-trips.
     cortex_tool: CortexAnalystTool | None = None
     try:
         cortex_config = CortexConfig()  # type: ignore[call-arg]
+    except ValidationError:
+        cortex_config = None
+        STATE.errors["cortex_analyst"] = "SNOWFLAKE_PAT / CORTEX_SEMANTIC_VIEW not configured"
+        logger.info("web: cortex_analyst unavailable (no PAT / semantic view)")
+
+    if cortex_config is not None and not cortex_config.enabled:
+        STATE.errors["cortex_analyst"] = "disabled (CORTEX_ENABLED=false)"
+        logger.info("web: cortex_analyst disabled via CORTEX_ENABLED=false")
+    elif cortex_config is not None:
         cortex_tool = CortexAnalystTool(STATE.connection, cortex_config)
         STATE.agents["cortex_analyst"] = SnowflakeAgent(tools=[cortex_tool], config=agent_config)
         logger.info("web: cortex_analyst agent ready")
-    except ValidationError:
-        STATE.errors["cortex_analyst"] = "SNOWFLAKE_PAT / CORTEX_SEMANTIC_VIEW not configured"
-        logger.info("web: cortex_analyst unavailable (no PAT / semantic view)")
 
     # "auto" gives the agent both query tools so it can decide, per question, whether to
     # use semantic search (Cortex Analyst) or write raw SQL. Falls back to just run_sql
@@ -295,10 +325,15 @@ async def lifespan(app: FastAPI):
     STATE.agents["auto"] = SnowflakeAgent(tools=auto_tools, config=agent_config)
     logger.info("web: auto agent ready (%d query tools)", len(auto_tools))
 
-    # Shared Anthropic client + config for the one-shot ingest structuring call.
+    # Shared Anthropic client + config for the one-shot ingest structuring call. An explicit
+    # timeout matters here: the SDK's default is 600s, so a stalled provider connection would
+    # hold the ingest slot for ten minutes and look like a hung upload. Structuring a large
+    # document legitimately takes minutes, so this is generous but bounded.
     STATE.agent_config = agent_config
     STATE.anthropic_client = anthropic.Anthropic(
-        api_key=agent_config.api_key, base_url=agent_config.base_url
+        api_key=agent_config.api_key,
+        base_url=agent_config.base_url,
+        timeout=300.0,
     )
 
     # Per-owner enforcement config always loads (all fields have safe defaults, so it
@@ -520,21 +555,29 @@ async def ingest_structure(
     # entity_types/attributes instead of minting near-duplicates. Read under the shared
     # read lock (same connection the agent uses); best-effort — a failed read yields an
     # empty registry and structuring proceeds on the guide alone.
-    registry: dict[str, list[str]] = {}
-    if STATE.connection is not None:
+    # Everything below blocks: a Snowflake query and a multi-second (sometimes multi-minute)
+    # LLM call. This is the ONLY `async def` handler, so running that work inline would block
+    # the event loop and freeze the WHOLE server — every other request, including the ingest
+    # page itself, hangs until structuring finishes. Offload it to a worker thread (the same
+    # thing FastAPI does automatically for plain `def` handlers) so the app stays responsive.
+    # `_LOCK` is still what serializes the shared Snowflake connection and the model client.
+    def _structure_blocking() -> StructuredResult:
+        registry: dict[str, list[str]] = {}
+        if STATE.connection is not None:
+            with _LOCK:
+                # Scope to internal-only FIRST: this read binds no caller, so once the
+                # row-access policy is live it would otherwise inherit whatever identity the
+                # last /api/ask left on the shared session. The registry is shared vocabulary
+                # and must never surface a private/protected row's entity_type/attribute.
+                _scope_read_internal_only()
+                registry = read_registry(STATE.connection)
         with _LOCK:
-            # Scope to internal-only FIRST: this read binds no caller, so once the
-            # row-access policy is live it would otherwise inherit whatever identity the
-            # last /api/ask left on the shared session. The registry is shared vocabulary
-            # and must never surface a private/protected row's entity_type/attribute.
-            _scope_read_internal_only()
-            registry = read_registry(STATE.connection)
-
-    try:
-        with _LOCK:
-            structured = structure_upload(
+            return structure_upload(
                 STATE.anthropic_client, STATE.agent_config, filename, raw, registry=registry
             )
+
+    try:
+        structured = await anyio.to_thread.run_sync(_structure_blocking)
     except IngestError as e:
         # Unsupported type -> 415; other ingest failures (truncation, bad JSON) -> 422.
         status = 415 if "Unsupported file type" in str(e) else 422
