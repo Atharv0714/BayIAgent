@@ -537,7 +537,7 @@ def structure_upload(
 
     # Meter the call the same way the agent loop does, so ingest cost is comparable.
     usage = usage_from(resp)
-    cost_usd = _estimate_cost(usage)
+    cost_usd = _estimate_cost(usage, config.model)
     tokens = {**usage, "total": sum(usage.values())}
 
     if resp.stop_reason == "max_tokens":
