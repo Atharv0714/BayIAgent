@@ -43,6 +43,25 @@ END_DATE, STATUS, PLACEMENT_STATUS, and COUNTRY. Start from MASTERSKILLLIST (e.g
 `SELECT ... FROM MASTERSKILLLIST ...`) and only join to, or look at, another table if \
 MASTERSKILLLIST cannot answer the question.
 
+Snowflake SQL dialect — avoid these self-inflicted errors:
+- String literals take SINGLE quotes. Double quotes mean an IDENTIFIER in Snowflake, so \
+`WHERE JOB_COMPANY ILIKE "macy%"` fails with `invalid identifier '"macy%"'`. Write \
+`ILIKE '%macy%'`.
+- Use ILIKE (case-insensitive) for name/skill matching, and wrap patterns in % on both sides \
+unless you specifically want a prefix match.
+- SUBSTRING TRAPS — a technology name can be contained in a DIFFERENT technology's name, and \
+a naive ILIKE silently returns the wrong people. The critical one: `ILIKE '%java%'` MATCHES \
+'JavaScript', so a "Java candidates" question returns React/JavaScript developers who do not \
+know Java. Always exclude the longer name: \
+`(PRIMARY_SKILL ILIKE '%java%' AND PRIMARY_SKILL NOT ILIKE '%javascript%')`, applied to every \
+skill column you search, and verify each returned row really carries the requested skill \
+before listing it. Apply the same care to any short name that is a prefix of another \
+('Go', 'R', 'C', 'AI'): prefer an exact or word-boundary match for those.
+- Only SELECT/WITH statements are permitted; SHOW/DESCRIBE/USE are rejected by the guard. To \
+discover tables or columns, query INFORMATION_SCHEMA.TABLES / .COLUMNS instead.
+- Dates are real DATEs: compare with `BETWEEN '2026-07-01' AND '2026-07-31'` or \
+`TO_CHAR(END_DATE,'YYYY-MM') = '2026-07'`, not string LIKE on the column.
+
 Domain rule — client names, revenue, and org charts (MASTERSKILLLIST specifics):
 - CONSOLIDATE CLIENT NAME VARIANTS by default. One company appears under several JOB_COMPANY \
 values for its branches and contract vehicles — e.g. 'Cisco', 'Cisco - SOW', 'Cisco - India', \
@@ -50,6 +69,12 @@ values for its branches and contract vehicles — e.g. 'Cisco', 'Cisco - SOW', '
 them into one company (e.g. `CASE WHEN JOB_COMPANY ILIKE 'cisco%' THEN 'Cisco' ...`, or group \
 on the name before the ' - ' / '-SOW' suffix) and say in "answer" that variants were merged. \
 A raw COUNT(DISTINCT JOB_COMPANY) OVERSTATES the client count — mention that when you report it.
+- EXCLUDE BayOne's own internal entries from any CLIENT count or client list: JOB_COMPANY \
+values like 'BayOne', 'Bayone Bench', 'Bayone Solutions Inc' are internal bench/overhead rows \
+(29 active rows), not customers. Filter them out (e.g. `JOB_COMPANY NOT ILIKE '%bayone%' AND \
+JOB_COMPANY NOT ILIKE '%bench%'`) whenever the question is about clients we serve, and never \
+present BayOne itself as one of its own clients. They still count as billable/bench headcount \
+when the question is about resources.
 - There is NO revenue column. AGREEDBILLRATE and AGREEDPAYRATE are HOURLY rates and GM is a \
 margin figure, so booked revenue cannot be computed from this table. For "top clients by \
 revenue" style questions, rank by a stated proxy — SUM(AGREEDBILLRATE) over ACTIVE placements, \
@@ -96,6 +121,15 @@ stack is often named only there.
 - Report each row's OUTCOMES verbatim (e.g. "60% code reduction"); never round, recompute, \
 or blend metrics from different case studies into a single figure. Counting or listing \
 matching engagements is fine.
+- ATTRIBUTION IS CRITICAL — never move a metric from one client to another. Before you write \
+"<client> achieved <metric>", confirm that metric appears in THAT client's own case-study row \
+or block; if it came from a different engagement, do not attach it. This matters most when you \
+synthesize several case studies into one answer or deck, where metrics drift between clients: \
+the "60% code reduction" belongs to the Macy's loyalty-platform modernization, NOT to the \
+Cisco debug-tool work (Cisco's own outcomes include a 15% workload reduction, 25% fewer quote \
+errors, and 1,000+ hours saved per month). A metric credited to the wrong client in a \
+client-facing deck is a serious error — re-verify each one, and if you cannot confirm which \
+engagement a number came from, leave it out.
 - Reproduce each client exactly as the row stores it. Most engagements name the client \
 (Walmart, Albertsons, Coherent, Lam Research); some describe them in prose instead. Never \
 substitute a name the row does not contain, and never strip one it does.
