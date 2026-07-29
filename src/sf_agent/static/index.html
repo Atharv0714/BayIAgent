@@ -158,6 +158,9 @@
   table.kv td.k { width: 38%; white-space: nowrap; }
   .vscalar { font-size: 14px; margin: 0; }
   .vempty { color: var(--muted); font-style: italic; opacity: .85; }
+  /* Nested object/list rendered inside a single cell (see cell()). */
+  .kvp { display: inline-block; }
+  .kvk { color: var(--muted); font-size: 12px; }
   details { margin-top: 10px; }
   summary { cursor: pointer; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; font-family: var(--display); font-weight: 700; }
   .diag table { margin-top: 8px; font-size: 12.5px; }
@@ -406,11 +409,31 @@ function humanize(k) {
     }).join(" ");
 }
 // Missing/null is flagged explicitly, never blanked out, so gaps in the data are visible.
-function cell(v) {
+const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
+
+// Render one cell value. Must handle NESTED structures: the agent's "values" often contain an
+// object or list inside a table cell (e.g. a role category carrying its own titles, or a
+// client carrying a per-region breakdown). esc() alone would stringify those as
+// "[object Object]", which is what users were seeing. Recurses so any depth stays readable,
+// with a JSON fallback as a backstop.
+function cell(v, depth = 0) {
   if (v === null || v === undefined || v === "") return `<span class="vempty">missing</span>`;
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (depth > 3) { try { return esc(JSON.stringify(v)); } catch { return esc(String(v)); } }
+  if (Array.isArray(v)) {
+    if (!v.length) return `<span class="vempty">none</span>`;
+    // Objects stack on their own lines; scalars read as a comma list.
+    return v.some(isObj)
+      ? v.map((x) => cell(x, depth + 1)).join("<br>")
+      : v.map((x) => cell(x, depth + 1)).join(", ");
+  }
+  if (isObj(v)) {
+    const parts = Object.entries(v).map(([k, iv]) =>
+      `<span class="kvp"><span class="kvk">${esc(humanize(k))}:</span> ${cell(iv, depth + 1)}</span>`);
+    return parts.join(" · ") || `<span class="vempty">none</span>`;
+  }
   return esc(v);
 }
-const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
 
 // Render a supporting value by shape: a list of row objects becomes a real table,
 // a single object a key/value table, a scalar list a readable line, a scalar plain text.
@@ -424,7 +447,7 @@ function renderValue(v) {
       const body = v.map((r) => `<tr>${cols.map((c) => `<td>${cell(r[c])}</td>`).join("")}</tr>`).join("");
       return `<div class="vscroll"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
-    return `<p class="vscalar">${v.map((item) => isObj(item) ? esc(JSON.stringify(item)) : cell(item)).join(", ")}</p>`;
+    return `<p class="vscalar">${v.map((item) => cell(item)).join(v.some(isObj) ? "<br>" : ", ")}</p>`;
   }
   if (isObj(v)) {
     const rows = Object.entries(v).map(([k, iv]) =>
