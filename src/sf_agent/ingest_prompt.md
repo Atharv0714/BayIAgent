@@ -145,13 +145,39 @@ Visual content (do not leave images as stubs):
 - Charts: pull series + categories from chart data into a table block AND facts rows, even if labeled "illustrative".
 - Log decorative images (logos, headshots) as dropped:decorative; do not emit empty rows.
 
+Hierarchies & org charts (capture WHO REPORTS TO WHOM, not just the picture):
+An org chart encodes reporting relationships by POSITION — losing that is losing the document.
+- Reading convention: columns run left→right from most senior to least senior. A person's cell
+  sits at the TOP of the block of rows it owns; the empty rows beneath it are that person's
+  span. The names one column to the RIGHT, within that span (down to the next name in the
+  person's OWN column), are that person's DIRECT reports. (Same idea as a merged cell / a
+  forward-filled indent.) Recurse down the columns.
+- Emit BOTH of the following; do NOT atomize the chart into one block per person.
+  1. Relationship facts — one set per person (entity_type=`person`; resolve each name to ONE
+     canonical entity_name and reuse it on every edge):
+       • attribute=`reports_to`, value_text=<manager's canonical name>, raw_value=<verbatim>.
+         OMIT only for the single top person. unit=`unknown`, value_num=null.
+       • attribute=`org_level`, value_num=<depth: top=1, its reports=2, …>, unit=`count`.
+       • attribute=`title`, value_text=<role/title> when the chart shows one (else omit).
+  2. ONE hierarchy block, content_type=`table` (image_class=`org_chart` when the source is an
+     image):
+       • table_markdown (REQUIRED — this is the table gate): a clean relationship table
+         `| Person | Reports to | Level |`, one row per person (the top person's *Reports to*
+         is `—`). This is the canonical, retrievable form of the whole chart.
+       • table_html (optional): the original spanning grid when it preserves layout the
+         markdown can't express.
+       • text_content (never empty): a one-sentence caption naming the org/unit and that it is
+         a reporting hierarchy; a nested indented outline (one person per line, indented by
+         org_level) is welcome here too.
+- The reports_to facts carry the structure; the single block carries the readable shape.
+
 ## Format handling (any type)
 
 - pptx: fake-table trap. Decks are often grids of separate text boxes (no real table objects). Reconstruct grids by clustering boxes into horizontal bands and normalizing each to a fixed column count; or extract from the PDF render if available. Pull chart XML and image text.
 - pdf: ground truth for decks. Cross-page tables follow the universal stitch rule (one block, repeated header). Skip narrative unless it states a fact.
 - docx: tables -> rows; "Field: value" blocks -> one record; ignore commentary; capture section owners.
-- xlsx/csv: find the real header row; unpivot period columns; drop Total/subtotal rows; forward-fill merged cells; each numeric cell -> a fact.
-- image: OCR to text; if it's a chart/table screenshot, reconstruct it; else one image_text block.
+- xlsx/csv: find the real header row; unpivot period columns; drop Total/subtotal rows; forward-fill merged cells; each numeric cell -> a fact. A positional NAME grid (people placed by column with blank-spanned rows and no real header) is an ORG CHART, not a data table — apply the Hierarchies rule (reports_to edges + one outline block), do NOT read it as header+rows.
+- image: OCR to text; if it's a chart/table screenshot, reconstruct it; if it's an org chart, apply the Hierarchies rule (reports_to/org_level edges + one org_chart block), not just OCR; else one image_text block.
 - txt/markdown/html: strip boilerplate/nav; headings -> section_title; paragraphs -> narrative blocks; tables -> table blocks + facts.
 - email: header (from/to/date/subject) -> facts or block fields; body -> narrative; one thread = ordered blocks.
 - chat/transcript: one block per turn or per topic segment; speaker -> owner; timestamps -> facts.
@@ -171,6 +197,7 @@ Visual content (do not leave images as stubs):
 - Placeholders excluded from facts; present in blocks with block_status=placeholder.
 - Coverage: mapped_units + dropped_units == total_source_units. Set manifest.coverage_ok accordingly.
 - No fabricated values. If confidence < 0.5 for a fact, keep raw_value, null value_num, and add a warning.
+- Org chart: every person except the single top person has exactly one `reports_to` edge; `org_level` is a positive int consistent with the chain (a report's level = its manager's + 1); no cycles (nobody is their own ancestor). One hierarchy block accompanies the edges.
 - Return JSON only. If you cannot structure the input at all, return empty blocks/facts with coverage_ok=false and a warning explaining why.
 
 ---
