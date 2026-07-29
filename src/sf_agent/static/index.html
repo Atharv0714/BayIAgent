@@ -107,6 +107,14 @@
     letter-spacing: .01em;
   }
   .answer { margin: 0; }
+  /* Rendered markdown inside an answer (see mdToHtml). */
+  .answer p { margin: 0 0 8px; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer ul, .answer ol { margin: 4px 0 8px; padding-left: 22px; }
+  .answer li { margin: 2px 0; }
+  .answer code { background: var(--code); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; font-size: 12.5px; }
+  .answer strong { font-weight: 700; }
+  .answer .ahead { font-family: var(--display); font-weight: 700; font-size: 13.5px; margin: 10px 0 4px; color: var(--text); }
   .klabel { color: var(--muted); font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .05em; font-family: var(--display); font-weight: 700; }
   .vname { font-family: var(--display); }
 
@@ -347,6 +355,38 @@ const EXAMPLES = [
 
 function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
+// Render the small markdown subset the model actually emits (bold, italic, inline code,
+// bullet and numbered lists, headings) into HTML. The answer prompt asks for markdown
+// structure, so without this the user reads literal "**58 clients**" and "- " markers.
+// XSS-safe by construction: the text is HTML-escaped FIRST, and only our own tags are
+// added afterwards — no untrusted markup can survive.
+function mdToHtml(text) {
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*(?!\s)([^*]+?)(?<!\s)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)(?<!\s)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>")
+    .replace(/(^|[\s(])_(?!\s)([^_\n]+?)(?<!\s)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+
+  const out = [];
+  let list = null;                       // "ul" | "ol" | null
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const openList = (kind) => { if (list !== kind) { closeList(); out.push(`<${kind}>`); list = kind; } };
+
+  for (const raw of esc(String(text || "")).split("\n")) {
+    const line = raw.trim();
+    if (!line) { closeList(); continue; }
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+    if (heading) { closeList(); out.push(`<div class="ahead">${inline(heading[2])}</div>`); }
+    else if (bullet) { openList("ul"); out.push(`<li>${inline(bullet[1])}</li>`); }
+    else if (numbered) { openList("ol"); out.push(`<li>${inline(numbered[1])}</li>`); }
+    else { closeList(); out.push(`<p>${inline(line)}</p>`); }
+  }
+  closeList();
+  return out.join("");
+}
+
 // Known abbreviations that should stay upper-case in labels (ordinary all-caps
 // field words like "CANDIDATE" are still Title-cased; only these are kept as acronyms).
 const ACRONYMS = new Set([
@@ -573,7 +613,7 @@ function botInner(d) {
   html += routePill(d);
   if (d.value !== null && d.value !== undefined && d.value !== "")
     html += `<div class="badge">${esc(d.value)}</div>`;
-  html += `<p class="answer">${esc(d.answer)}</p>`;
+  html += `<div class="answer">${mdToHtml(d.answer)}</div>`;
   if (d.chart && typeof d.chart === "object") {
     const id = `chart_${chartSeq++}`;
     pendingCharts.push({ id, spec: d.chart });

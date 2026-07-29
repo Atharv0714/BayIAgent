@@ -168,3 +168,43 @@ def test_slides_named_column_is_not_treated_as_a_deck():
     # A numeric 'slides' value (not a list of slide objects) stays an ordinary value.
     m = answer_to_document({"answer": "x", "value": 5, "values": {"slides": 5}}, "how many slides?")
     assert m.slides == []
+
+
+# --- markdown must not leak into generated documents -----------------------------------
+def test_strip_markdown_removes_markers_but_keeps_text():
+    from sf_agent.export.model import strip_markdown
+
+    assert strip_markdown("**58 clients** via `MASTERSKILLLIST`") == "58 clients via MASTERSKILLLIST"
+    assert strip_markdown("### Heading") == "Heading"
+    assert strip_markdown("- **Google** (145)") == "Google (145)"
+    assert strip_markdown("*eBay* and _Cisco_") == "eBay and Cisco"
+    # Not markdown: arithmetic and snake_case identifiers must survive untouched.
+    assert strip_markdown("Rate is 5 * 3 and a_var_name stays") == "Rate is 5 * 3 and a_var_name stays"
+
+
+def test_document_summary_and_slides_are_plain_text():
+    """The prompt asks for markdown, the chat UI renders it — but PPTX/DOCX/PDF writers emit
+    plain runs, so markers would show as literal '**' in a client-facing deck."""
+    model = answer_to_document(
+        {
+            "answer": "We have **650** billable resources — **418** Enterprise.",
+            "values": {
+                "slides": [
+                    {
+                        "title": "**Overview**",
+                        "content": ["- **Google** 145", "*eBay* 38"],
+                        "speaker_notes": "Cite **exactly**.",
+                    }
+                ]
+            },
+        },
+        "q",
+    )
+    assert "**" not in model.summary
+    assert model.summary == "We have 650 billable resources — 418 Enterprise."
+    s = model.slides[0]
+    assert s.title == "Overview"
+    assert s.bullets == ["Google 145", "eBay 38"]
+    assert s.notes == "Cite exactly."
+    # And it survives into a real file.
+    assert render_document(model, "pptx")[:2] == b"PK"

@@ -11,6 +11,7 @@ document lays the data out the same way the on-screen answer does.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
 
@@ -83,6 +84,24 @@ class DocumentModel(BaseModel):
     sources: list[str] = Field(default_factory=list)
 
 
+def strip_markdown(text: Any) -> str:
+    """Remove markdown markers so generated documents don't show literal ``**`` and ``-``.
+
+    The answer prompt asks for markdown structure, which the chat UI renders — but the
+    PPTX/DOCX/PDF renderers write plain text runs, so the markers would appear verbatim in a
+    client-facing deck. Emphasis is dropped rather than converted, because these writers set
+    formatting per run and a mid-string bold span cannot be expressed in a single text value.
+    """
+    s = str(text or "")
+    s = re.sub(r"`([^`]*)`", r"\1", s)                       # inline code
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)                  # **bold**
+    s = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"\1", s)  # *italic*
+    s = re.sub(r"(?<![\w_])_([^_\n]+)_(?![\w_])", r"\1", s)    # _italic_
+    s = re.sub(r"^\s{0,3}#{1,6}\s+", "", s, flags=re.M)       # ### heading
+    s = re.sub(r"^\s{0,3}[-*•]\s+", "", s, flags=re.M)        # - bullet (renderers add their own)
+    return s.strip()
+
+
 def cell_text(v: Any) -> str:
     """Display string for a cell. None/blank becomes an em dash so gaps stay visible
     (never silently dropped); dicts/lists serialize compactly."""
@@ -145,17 +164,17 @@ def _parse_slides(v: Any) -> list[Slide]:
             continue
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or item.get("heading") or item.get("name") or "Slide").strip() or "Slide"
+        title = strip_markdown(item.get("title") or item.get("heading") or item.get("name") or "Slide") or "Slide"
         content = item.get("content")
         if content is None:
             content = item.get("bullets") or item.get("body") or item.get("points")
         bullets: list[str] = []
         if isinstance(content, list):
-            bullets = [cell_text(b).strip() for b in content if b not in (None, "")]
+            bullets = [strip_markdown(cell_text(b)) for b in content if b not in (None, "")]
         elif isinstance(content, str) and content.strip():
-            bullets = [ln.strip(" -•\t") for ln in content.splitlines() if ln.strip()] or [content.strip()]
+            bullets = [strip_markdown(ln) for ln in content.splitlines() if ln.strip()] or [strip_markdown(content)]
         notes = item.get("notes") or item.get("speaker_notes") or item.get("speakerNotes")
-        notes = str(notes).strip() if notes not in (None, "") else None
+        notes = strip_markdown(notes) if notes not in (None, "") else None
         slides.append(Slide(title=title, bullets=bullets, notes=notes))
     return slides
 
@@ -213,7 +232,7 @@ def answer_to_document(payload: dict[str, Any], question: str | None = None) -> 
         subtitle="BayI Intelligence Agent · BayOne",
         generated_on=date.today().isoformat(),
         headline=headline,
-        summary=str(payload.get("answer") or ""),
+        summary=strip_markdown(payload.get("answer")),
         tables=tables,
         slides=slides,
         chart=chart,
