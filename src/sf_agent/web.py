@@ -603,7 +603,7 @@ async def ingest_structure(
         # only the model so the rest of the agent config (token ceiling) is unchanged.
         client = STATE.anthropic_client
         cfg = STATE.agent_config
-        if needs_vision(filename) and STATE.vision_client is not None:
+        if needs_vision(filename, raw) and STATE.vision_client is not None:
             client = STATE.vision_client
             cfg = cfg.model_copy(update={"model": cfg.vision_model})
         with _LOCK:
@@ -612,7 +612,7 @@ async def ingest_structure(
     # Fail loudly instead of silently returning an empty structure: without a vision lane a
     # non-Anthropic main provider cannot read document blocks at all.
     if (
-        needs_vision(filename)
+        needs_vision(filename, raw)
         and STATE.vision_client is None
         and STATE.agent_config.base_url
     ):

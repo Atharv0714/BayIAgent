@@ -28,6 +28,7 @@ from typing import Any
 import anthropic
 from pydantic import BaseModel, Field
 
+from sf_agent import extract
 from sf_agent.agent import _estimate_cost, _extract_json
 from sf_agent.config import AgentConfig
 from sf_agent.router import usage_from
@@ -244,10 +245,12 @@ def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
     chat's context-attachment path (an uploaded doc the user wants the assistant to read).
     """
     ext = Path(filename).suffix.lower()
-    if ext in _SPREADSHEET_EXTS:
-        # Excel goes in as text (per-sheet CSV), never via PDF render — pagination would
-        # scatter a wide sheet's columns across pages and destroy positional meaning.
-        text = _spreadsheet_to_text(filename, raw)
+    # Try LOCAL layout-preserving extraction first: it is readable by any model (so the cheap
+    # main provider can structure it) and it keeps a positional document's column structure.
+    # Only fall through to a vision content block when nothing usable comes back — an image,
+    # a scanned PDF, or a binary the extractors can't open.
+    text = local_text(filename, raw)
+    if text is not None:
         return {"type": "text", "text": f"Filename: {filename}\n\n{text}"}
     if ext in _OFFICE_EXTS:
         # Convert in place: the model still sees the original filename for provenance.
@@ -279,19 +282,46 @@ def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
     )
 
 
-def needs_vision(filename: str) -> bool:
+def local_text(filename: str, raw: bytes) -> str | None:
+    """Layout-preserving text extracted locally, or None when only vision can read the file.
+
+    Trying this first is what keeps cost down: a text-based document is fully readable by any
+    model once extracted, so it goes to the cheap main provider instead of a vision provider.
+    Extraction preserves POSITION (see sf_agent.extract), so a positional document such as an
+    org chart keeps the column structure that encodes its hierarchy. Returns None for images,
+    scanned/image-only PDFs, and anything the extractors can't open — those genuinely need
+    vision.
+    """
+    ext = Path(filename).suffix.lower()
+    if ext in _SPREADSHEET_EXTS:
+        return _spreadsheet_to_text(filename, raw)
+    if ext in _PDF_EXTS:
+        return extract.pdf_text(raw)
+    if ext in {".pptx", ".potx"}:
+        return extract.pptx_text(raw)
+    if ext == ".docx":
+        return extract.docx_text(raw)
+    return None
+
+
+def needs_vision(filename: str, raw: bytes | None = None) -> bool:
     """True when reading this file requires provider-side document/image vision.
 
-    PDFs, Word/PowerPoint (rendered to PDF), and images all reach the model as `document`
-    or `image` content blocks, which only a vision-capable provider can decode. Text-family
-    files and spreadsheets (serialized to CSV text) are readable by any model, so they stay
-    on the main provider. The caller uses this to route a document upload to the configured
-    vision provider — see AgentConfig.vision_enabled.
+    Content-aware when `raw` is given: a PDF/Office file whose text extracts locally does NOT
+    need vision (it will be sent as text), while an image, a scanned PDF, or an unreadable
+    binary does. Without `raw`, falls back to a conservative by-extension answer. Callers use
+    this to route an upload to the configured vision provider — see AgentConfig.vision_enabled.
     """
     ext = Path(filename).suffix.lower()
     if ext in _SPREADSHEET_EXTS or ext in _TEXT_EXTS:
         return False
-    return ext in _PDF_EXTS or ext in _OFFICE_EXTS or ext in _IMAGE_MEDIA
+    if ext in _IMAGE_MEDIA:
+        return True  # a picture is only readable by vision
+    if ext in _PDF_EXTS or ext in _OFFICE_EXTS:
+        if raw is None:
+            return True
+        return local_text(filename, raw) is None
+    return False
 
 
 def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
