@@ -279,6 +279,21 @@ def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
     )
 
 
+def needs_vision(filename: str) -> bool:
+    """True when reading this file requires provider-side document/image vision.
+
+    PDFs, Word/PowerPoint (rendered to PDF), and images all reach the model as `document`
+    or `image` content blocks, which only a vision-capable provider can decode. Text-family
+    files and spreadsheets (serialized to CSV text) are readable by any model, so they stay
+    on the main provider. The caller uses this to route a document upload to the configured
+    vision provider — see AgentConfig.vision_enabled.
+    """
+    ext = Path(filename).suffix.lower()
+    if ext in _SPREADSHEET_EXTS or ext in _TEXT_EXTS:
+        return False
+    return ext in _PDF_EXTS or ext in _OFFICE_EXTS or ext in _IMAGE_MEDIA
+
+
 def build_content_block(filename: str, raw: bytes) -> list[dict[str, Any]]:
     """Turn one uploaded file into Anthropic content blocks for the structuring call:
     the file itself plus the ingest instruction. Raises IngestError for unknown types."""

@@ -201,6 +201,31 @@ class AgentConfig(BaseSettings):
     # chunking (multiple calls), not a higher number.
     ingest_max_tokens: int = Field(default=128000, gt=0, validation_alias="INGEST_MAX_TOKENS")
 
+    # ── document-vision lane (PDF / Word / PowerPoint / images) ──────────────────────
+    # Reading a PDF requires the provider to accept Anthropic `document` content blocks.
+    # Z.AI's compatible endpoint does NOT: GLM sees only metadata and returns an empty
+    # structuring result, so PDF/Office ingest silently yields nothing. Point this lane at a
+    # provider with real document vision (Anthropic) while queries stay on the cheap main
+    # provider. Set INGEST_VISION_API_KEY to enable; leave blank and document uploads use the
+    # main provider exactly as before (correct when the main provider IS Anthropic).
+    vision_api_key: str | None = Field(default=None, validation_alias="INGEST_VISION_API_KEY")
+    vision_base_url: str | None = Field(default=None, validation_alias="INGEST_VISION_BASE_URL")
+    vision_model: str = Field(
+        default="claude-sonnet-4-6", validation_alias="INGEST_VISION_MODEL"
+    )
+
+    @property
+    def vision_enabled(self) -> bool:
+        """True when a separate document-vision provider is configured."""
+        return bool(self.vision_api_key)
+
+    @field_validator("vision_api_key", "vision_base_url", mode="before")
+    @classmethod
+    def _blank_vision_to_none(cls, v: object) -> object:
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
     @field_validator("base_url", mode="before")
     @classmethod
     def _blank_to_none(cls, v: object) -> object:
@@ -226,6 +251,11 @@ class CortexConfig(BaseSettings):
         populate_by_name=True,
     )
 
+    # Master switch. Default true preserves behavior; set CORTEX_ENABLED=false to turn the
+    # Cortex Analyst path off entirely (the "auto" agent then uses run_sql only). Useful
+    # when the semantic model isn't valid — a broken Analyst call is wasted latency and a
+    # pointless round-trip before the run_sql fallback.
+    enabled: bool = Field(default=True, validation_alias="CORTEX_ENABLED")
     account: str = Field(min_length=1, validation_alias="SNOWFLAKE_ACCOUNT")
     pat: str = Field(min_length=1, validation_alias="SNOWFLAKE_PAT")
     semantic_view: str = Field(min_length=1, validation_alias="CORTEX_SEMANTIC_VIEW")

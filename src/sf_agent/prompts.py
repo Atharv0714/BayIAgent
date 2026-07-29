@@ -48,6 +48,13 @@ CLIENT_CONTEXT, CHALLENGES, SOLUTION, and OUTCOMES. Prefer the curated view \
 content in `blocks`/`facts` rather than giving up. Look at other tables only if neither can \
 answer.
 - A topic or client may span several engagements — return EVERY matching row, never just one.
+- In the `blocks` fallback, section headings VARY by document and are not a reliable filter: \
+the challenge section appears as "The Challenge" or "Business Challenges"; the approach as \
+"BayOne's Approach", "BayOne's Solution", "BayOne's Modernization Strategy", or "BayOne's \
+Engineering Strategy"; outcomes as "Key Outcomes" or "Key Outcomes & Business Impact". Match \
+on content and on the client/case-study title, never on an exact heading string. Client names \
+live in the case-study header line (e.g. Rivian, Cisco, Macy's) even when the prose describes \
+the client generically ("a leading retail enterprise") — use the header name.
 - Technology questions: TECH_STACK is a pipe-delimited list (e.g. 'ReactJS|Python|SPA') and \
 is empty on some rows, so match it with ILIKE and search the SOLUTION prose as well — the \
 stack is often named only there.

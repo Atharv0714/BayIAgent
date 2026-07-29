@@ -48,6 +48,7 @@ from sf_agent.ingest import (
     StructuredResult,
     coerce_for_validation,
     file_content_block,
+    needs_vision,
     stamp_sensitivity,
     structure_upload,
     tier_requirements,
@@ -94,6 +95,9 @@ class _State:
     ingest_error: str | None = None
     # Shared Anthropic client for the one-shot structuring call.
     anthropic_client: anthropic.Anthropic | None = None
+    # Separate client for document uploads (PDF/Word/PowerPoint/images) when a
+    # vision-capable provider is configured; None means documents use the main client.
+    vision_client: anthropic.Anthropic | None = None
     agent_config: AgentConfig | None = None
     # ingest_id -> server-held validated payload, awaiting a commit. The commit writes
     # THIS (never a client re-submission), so the confirmation gate is real.
@@ -336,6 +340,29 @@ async def lifespan(app: FastAPI):
         timeout=300.0,
     )
 
+    # Document-vision lane: PDFs and Office files need a provider that decodes `document`
+    # content blocks. When configured, document uploads route here while every query (and
+    # text/spreadsheet ingest) stays on the cheap main provider.
+    if agent_config.vision_enabled:
+        STATE.vision_client = anthropic.Anthropic(
+            api_key=agent_config.vision_api_key,
+            base_url=agent_config.vision_base_url,
+            timeout=300.0,
+        )
+        logger.info(
+            "web: document-vision lane ready endpoint=%s model=%s",
+            agent_config.vision_base_url or "https://api.anthropic.com (default)",
+            agent_config.vision_model,
+        )
+    elif agent_config.base_url:
+        # Main provider is non-default (e.g. Z.AI) and no vision lane is set: PDF/Office
+        # uploads will come back empty because the model can't read document blocks.
+        logger.warning(
+            "web: no INGEST_VISION_API_KEY set while the main provider is %s — PDF/Word/"
+            "PowerPoint uploads may return no content; text and .xlsx uploads are fine",
+            agent_config.base_url,
+        )
+
     # Per-owner enforcement config always loads (all fields have safe defaults, so it
     # never raises). With enforce_ownership false it's a no-op; true turns on identity
     # binding + the ingest-only private path.
@@ -571,10 +598,36 @@ async def ingest_structure(
                 # and must never surface a private/protected row's entity_type/attribute.
                 _scope_read_internal_only()
                 registry = read_registry(STATE.connection)
+        # Route document uploads (PDF/Office/image) to the vision provider when one is
+        # configured; text and spreadsheets stay on the main provider. `model_copy` swaps
+        # only the model so the rest of the agent config (token ceiling) is unchanged.
+        client = STATE.anthropic_client
+        cfg = STATE.agent_config
+        if needs_vision(filename) and STATE.vision_client is not None:
+            client = STATE.vision_client
+            cfg = cfg.model_copy(update={"model": cfg.vision_model})
         with _LOCK:
-            return structure_upload(
-                STATE.anthropic_client, STATE.agent_config, filename, raw, registry=registry
-            )
+            return structure_upload(client, cfg, filename, raw, registry=registry)
+
+    # Fail loudly instead of silently returning an empty structure: without a vision lane a
+    # non-Anthropic main provider cannot read document blocks at all.
+    if (
+        needs_vision(filename)
+        and STATE.vision_client is None
+        and STATE.agent_config.base_url
+    ):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    f"This server's model provider cannot read '{filename}' (PDF, Word, "
+                    "PowerPoint and images need document vision). Set INGEST_VISION_API_KEY "
+                    "to route document uploads to a vision-capable provider, or upload a "
+                    "CSV/TXT/MD/XLSX version."
+                ),
+            },
+            status_code=422,
+        )
 
     try:
         structured = await anyio.to_thread.run_sync(_structure_blocking)

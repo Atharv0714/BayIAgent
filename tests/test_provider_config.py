@@ -55,3 +55,31 @@ def test_client_defaults_to_anthropic(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     agent = SnowflakeAgent(tools=[], config=_cfg())
     assert "anthropic.com" in str(agent._client.base_url)
+
+
+# --- document-vision lane -------------------------------------------------------------
+def test_vision_lane_disabled_by_default() -> None:
+    cfg = _cfg()
+    assert cfg.vision_enabled is False
+    assert cfg.vision_api_key is None
+
+
+def test_vision_lane_enables_with_key() -> None:
+    cfg = _cfg(vision_api_key="sk-ant-test", vision_model="claude-sonnet-4-6")
+    assert cfg.vision_enabled is True
+    assert cfg.vision_base_url is None  # blank -> Anthropic default
+
+
+def test_blank_vision_key_stays_disabled() -> None:
+    assert _cfg(vision_api_key="   ").vision_enabled is False
+
+
+def test_needs_vision_routes_documents_not_text() -> None:
+    from sf_agent.ingest import needs_vision
+
+    # Need provider-side document/image vision.
+    for name in ("cs.pdf", "deck.pptx", "report.docx", "chart.png", "scan.JPEG", "old.xls"):
+        assert needs_vision(name) is True, name
+    # Readable by any model as plain text -> stay on the cheap main provider.
+    for name in ("data.csv", "notes.md", "grid.xlsx", "sheet.xlsm", "page.html", "x.json"):
+        assert needs_vision(name) is False, name
