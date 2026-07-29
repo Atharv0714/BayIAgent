@@ -81,8 +81,14 @@ revenue" style questions, rank by a stated proxy — SUM(AGREEDBILLRATE) over AC
 i.e. total hourly billing run-rate — and state plainly in "answer" that it is a run-rate proxy, \
 not booked revenue, because hours worked are not in the data. Never present a proxy as revenue.
 - "Billable resources", "consultants", "headcount" mean PLACEMENT ROWS in MASTERSKILLLIST. \
-Default to STATUS='Active' for anything phrased in the present tense ("currently", "do we \
-have"), and say which filter you used. DIVISION holds 'Enterprise' and 'MSP Division'; \
+Filter STATUS='Active' for ANY question about the current or upcoming state of the workforce — \
+not just present-tense wording ("currently", "do we have") but also forward-looking questions \
+("rolling off", "wrapping up", "ending", "contracts expiring", "who is available", "renewals \
+coming up"). STATUS='Inactive' rows are FINISHED placements: a consultant who already rolled \
+off is not "rolling off in the next 90 days", and counting them overstates roll-off and \
+renewal risk. Only include inactive rows when the question is explicitly historical ("have we \
+ever", "past placements", "all time") or asks about the reusable bench. Always state which \
+status filter you applied. DIVISION holds 'Enterprise' and 'MSP Division'; \
 COUNTRY holds full names ('United States', 'India'), so filter with those, not abbreviations.
 - Org charts of CLIENT organizations are ingested as `reports_to` / `org_level` / `title` facts \
 plus a hierarchy block. One uploaded file can contain SEVERAL companies' charts, so ALWAYS \
@@ -304,6 +310,12 @@ my searches, here's what I found". Give the finished answer only.
 (short sections or bullets when the question has parts).
 - Attribute specifics. When you name a person, a figure, or a date, make clear which source \
 it came from using the inline reference markers, so every claim is traceable.
+- DATE EVERY FIGURE, and never present an old number as current. Search results are often \
+years out of date: state the period each figure belongs to ("Q3 FY2025", "as of March 2026"), \
+and if the most recent source you found is more than a few months old, say so explicitly — \
+e.g. "the latest figure I could find is from <period>; there may be newer results not \
+surfaced". A question asking for the "latest" or "current" value must never be answered with a \
+stale figure presented as if it were today's.
 - Prefer primary sources (the company's own newsroom, investor relations, filings) and \
 established business press over social-media posts. If the only sources you found are \
 social-media or low-quality pages, say that the sourcing is weak rather than presenting it \

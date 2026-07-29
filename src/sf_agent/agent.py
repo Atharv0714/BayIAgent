@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from datetime import date
 from typing import Any
 from urllib.parse import urlparse
 
@@ -615,17 +616,43 @@ class SnowflakeAgent:
                 msgs.append({"role": str(m["role"]), "content": content})
         msgs.append({"role": "user", "content": question})
 
-        try:
-            text, citations, usage = zai_search_answer(
+        def _search(extra: str | None = None):
+            payload = list(msgs)
+            if extra:
+                payload.append({"role": "user", "content": extra})
+            return zai_search_answer(
                 api_key=self._config.api_key,
                 model=self._config.model,
                 url=self._config.zai_search_url,
-                messages=msgs,
-                system=WEB_SYSTEM,
+                messages=payload,
+                # The model has no clock, so without today's date it cannot tell a current
+                # figure from a two-year-old one and will present stale results as "latest".
+                system=f"{WEB_SYSTEM}\n\nToday's date is {date.today().isoformat()}.",
                 max_tokens=self._config.max_tokens,
                 max_results=max(self._config.web_search_max_uses, 10),
             )
-        except WebSearchError as e:
+
+        # The search tool is MODEL-INVOKED, so GLM intermittently answers from memory (no
+        # sources) or returns an empty message — both of which we refuse rather than pass off
+        # as researched. Retry with an explicit instruction before giving up, so a perfectly
+        # answerable question isn't lost to one flaky turn.
+        _NUDGE = (
+            "You must call the web_search tool and base your answer only on the results it "
+            "returns, citing them with their reference markers. Do not answer from memory."
+        )
+        last_error: WebSearchError | None = None
+        text = citations = usage = None  # type: ignore[assignment]
+        for attempt in range(3):
+            try:
+                text, citations, usage = _search(_NUDGE if attempt else None)
+                last_error = None
+                break
+            except WebSearchError as err:
+                last_error = err
+                logger.info("zai web search attempt %d failed (%s)", attempt + 1, err)
+
+        if last_error is not None:
+            e = last_error
             logger.warning("zai web search failed q=%r err=%s", question, e)
             answer = AgentAnswer(
                 answer=(

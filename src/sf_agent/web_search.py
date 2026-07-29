@@ -15,6 +15,7 @@ the output to the same shape the Anthropic path produces, so the agent and UI ar
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import requests
@@ -129,7 +130,17 @@ def _clean_answer(raw: str) -> str:
     indentation. None of that belongs in a user-facing answer, and the prompt alone doesn't
     reliably suppress it.
     """
-    lines = [ln.strip() for ln in (raw or "").splitlines()]
+    # GLM also emits pseudo-XML retrieval tags (<search>query</search>, <think>...</think>)
+    # around its reasoning. Strip the tags and their contents before line filtering.
+    cleaned = re.sub(
+        r"<\s*(search|think|thinking|tool_call)\s*>.*?<\s*/\s*\1\s*>",
+        " ",
+        raw or "",
+        flags=re.S | re.I,
+    )
+    # ...and any stray unclosed tag left behind.
+    cleaned = re.sub(r"<\s*/?\s*(search|think|thinking|tool_call)\s*>", " ", cleaned, flags=re.I)
+    lines = [ln.strip() for ln in cleaned.splitlines()]
     kept: list[str] = []
     prefixes = (
         "search query:",
