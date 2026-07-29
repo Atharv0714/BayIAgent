@@ -104,6 +104,13 @@ Universal:
 - Every fact records source_block_index = the block_index of the block it was extracted from,
   so a computed number can surface its source table and vice versa.
 - Never invent. Absent -> null. Placeholder ($XM, ____%, empty template rows) -> block_status=placeholder in blocks; EXCLUDED from facts so it can't pollute SUM/COUNT.
+- SOURCE STRINGS ONLY — world knowledge is OFF-LIMITS for values. If you recognize the
+  organization, company, or people in the document, you must NOT complete, correct, or fill in
+  names/titles/structure from what you know about them. Every entity_name, title, and value
+  must be a string visibly present in the source. If part of the source is unreadable, drop it
+  with reason=unreadable and set coverage_ok=false — never substitute remembered facts. An org
+  chart of a well-known company must contain ONLY the names in the document, even if you
+  believe the document is wrong or incomplete.
 - Resolve entity aliases ("Kamesh G." == "Kamesh Gadepally") to one entity_name.
 - Prefer encoded signals over rendered text when they disagree (fill color beats an inconsistent emoji; note from_fill_color).
 

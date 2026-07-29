@@ -15,10 +15,14 @@ from sf_agent.ingest import (
 
 
 def test_source_parser_maps_transport_not_original_extension():
-    # Office + PDF both reach the model as rendered PDF pages -> pdf_vision.
+    # Word/PowerPoint + PDF reach the model as rendered PDF pages -> pdf_vision.
     assert _source_parser_for("deck.pptx") == "pdf_vision"
     assert _source_parser_for("report.PDF") == "pdf_vision"
-    assert _source_parser_for("sheet.xlsx") == "pdf_vision"
+    # Modern Excel is serialized to per-sheet CSV text (a PDF render would paginate a
+    # wide sheet and destroy positional grids like org charts); legacy .xls still
+    # goes through LibreOffice -> PDF because openpyxl cannot read it.
+    assert _source_parser_for("sheet.xlsx") == "text"
+    assert _source_parser_for("sheet.xls") == "pdf_vision"
     # Images go through vision/OCR; text-family stays inline text.
     assert _source_parser_for("chart.png") == "ocr"
     assert _source_parser_for("notes.md") == "text"

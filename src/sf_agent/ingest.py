@@ -51,10 +51,16 @@ _IMAGE_MEDIA = {
     ".webp": "image/webp",
 }
 _TEXT_EXTS = {".txt", ".md", ".markdown", ".csv", ".html", ".htm", ".json", ".eml"}
-# Word/Excel/PowerPoint (and their OpenDocument/RTF cousins): the model can't read these
-# binaries natively, so LibreOffice renders them to PDF, preserving tables/layout/images.
+# Modern Excel goes to the model as TEXT (per-sheet CSV via openpyxl), NOT via the
+# LibreOffice->PDF path. A PDF render paginates a wide sheet across pages, which destroys
+# the positional grid — fatal for positional documents like org charts, where the column a
+# name sits in IS the meaning. CSV text preserves every cell's row/column exactly.
+_SPREADSHEET_EXTS = {".xlsx", ".xlsm"}
+# Word/PowerPoint (and their OpenDocument/RTF cousins, plus legacy .xls which openpyxl
+# cannot read): the model can't read these binaries natively, so LibreOffice renders them
+# to PDF, preserving tables/layout/images.
 _OFFICE_EXTS = {
-    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".doc", ".docx", ".xls", ".ppt", ".pptx",
     ".odt", ".ods", ".odp", ".rtf",
 }
 
@@ -182,6 +188,51 @@ def _office_to_pdf(filename: str, raw: bytes) -> bytes:
         return pdf_path.read_bytes()
 
 
+def _spreadsheet_to_text(filename: str, raw: bytes) -> str:
+    """Serialize an .xlsx/.xlsm workbook to per-sheet CSV text, preserving the grid.
+
+    This is deliberately NOT the LibreOffice->PDF path: a PDF render paginates a wide
+    sheet, scattering columns across pages — which silently destroys positional documents
+    (org charts, planning grids) where a cell's row/column placement carries the meaning.
+    CSV keeps every cell exactly where it is, so the model reads the true layout. Values
+    only (fill colors/formatting are not carried); formulas surface as their cached values.
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError as e:  # pragma: no cover — docs extra is part of every deploy
+        raise IngestError(
+            "This server can't read Excel files (openpyxl is not installed) — "
+            "export the sheet as CSV and retry."
+        ) from e
+    import csv as _csv
+    import io as _io
+
+    try:
+        wb = load_workbook(_io.BytesIO(raw), data_only=True, read_only=True)
+    except Exception as e:  # noqa: BLE001 — corrupt/mislabeled workbook
+        raise IngestError(f"Could not read the Excel workbook: {e}") from e
+
+    out = _io.StringIO()
+    for ws in wb.worksheets:
+        out.write(f"### Sheet: {ws.title}\n")
+        writer = _csv.writer(out, lineterminator="\n")
+        blank_run = 0
+        for row in ws.iter_rows(values_only=True):
+            cells = ["" if v is None else str(v) for v in row]
+            if not any(c.strip() for c in cells):
+                # Keep single blank rows (they carry spacing/structure in positional
+                # sheets) but collapse long empty tails so huge dimensions stay cheap.
+                blank_run += 1
+                if blank_run > 2:
+                    continue
+                cells = []
+            else:
+                blank_run = 0
+            writer.writerow(cells)
+        out.write("\n")
+    return out.getvalue()
+
+
 def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
     """One Anthropic content block for an uploaded file, so the model can read it.
 
@@ -193,6 +244,11 @@ def file_content_block(filename: str, raw: bytes) -> dict[str, Any]:
     chat's context-attachment path (an uploaded doc the user wants the assistant to read).
     """
     ext = Path(filename).suffix.lower()
+    if ext in _SPREADSHEET_EXTS:
+        # Excel goes in as text (per-sheet CSV), never via PDF render — pagination would
+        # scatter a wide sheet's columns across pages and destroy positional meaning.
+        text = _spreadsheet_to_text(filename, raw)
+        return {"type": "text", "text": f"Filename: {filename}\n\n{text}"}
     if ext in _OFFICE_EXTS:
         # Convert in place: the model still sees the original filename for provenance.
         raw = _office_to_pdf(filename, raw)
@@ -454,8 +510,9 @@ _OPTIONAL_BLOCK_STRINGS = (
 
 
 def _source_parser_for(filename: str) -> str:
-    """How the app fed this file to the model (its provenance 'parser'). Office and PDF both
-    reach the model as rendered PDF pages (vision); images as vision/OCR; text-family inline."""
+    """How the app fed this file to the model (its provenance 'parser'). Word/PowerPoint and
+    PDF reach the model as rendered PDF pages (vision); images as vision/OCR; text-family —
+    including .xlsx/.xlsm, which are serialized to per-sheet CSV — inline as text."""
     ext = Path(filename).suffix.lower()
     if ext in _OFFICE_EXTS or ext in _PDF_EXTS:
         return "pdf_vision"

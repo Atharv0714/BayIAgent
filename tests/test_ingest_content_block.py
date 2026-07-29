@@ -68,3 +68,68 @@ def test_office_without_libreoffice_raises_convert_message(monkeypatch):
 def test_unknown_extension_is_rejected():
     with pytest.raises(IngestError):
         build_content_block("archive.zip", b"PK\x03\x04")
+
+
+def _tiny_xlsx() -> bytes:
+    """A 2-sheet workbook with a positional (org-chart-like) grid on sheet 1."""
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Org 2026"
+    ws["A1"] = "Jane Doe"
+    ws["B2"] = "Bob Smith"      # one column right, one row down: Bob reports to Jane
+    ws["C3"] = "Carol Lee"
+    ws2 = wb.create_sheet("VP")
+    ws2["A1"] = "VPs with Customer"
+    ws2["A2"] = "Pvv Raju"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_xlsx_becomes_positional_csv_text_not_pdf():
+    """Excel must reach the model as per-sheet CSV TEXT preserving the grid — never via the
+    LibreOffice->PDF render, whose pagination scatters a wide sheet's columns across pages
+    and silently destroys positional documents like org charts."""
+    blocks = build_content_block("Customer_Mapping.xlsx", _tiny_xlsx())
+    assert blocks[0]["type"] == "text"  # not a 'document' (PDF) block
+    text = blocks[0]["text"]
+    assert "Filename: Customer_Mapping.xlsx" in text
+    # Both sheets present, labeled.
+    assert "### Sheet: Org 2026" in text and "### Sheet: VP" in text
+    # The grid POSITIONS survive: Bob is one column right of Jane, Carol two right.
+    assert "Jane Doe" in text
+    assert ",Bob Smith" in text
+    assert ",,Carol Lee" in text
+
+
+def test_xlsx_never_calls_libreoffice(monkeypatch):
+    """Guard the routing itself: even with LibreOffice present, xlsx must not go to PDF."""
+
+    def _boom(*a, **k):  # pragma: no cover - failing is the assertion
+        raise AssertionError("xlsx was routed through _office_to_pdf")
+
+    monkeypatch.setattr(ingest, "_office_to_pdf", _boom)
+    blocks = build_content_block("grid.xlsx", _tiny_xlsx())
+    assert blocks[0]["type"] == "text"
+
+
+def test_xls_still_uses_office_path(monkeypatch):
+    """Legacy .xls (openpyxl can't read it) must still take the LibreOffice route."""
+    called = {}
+
+    def _fake(filename, raw):
+        called["yes"] = True
+        return b"%PDF-1.4 converted"
+
+    monkeypatch.setattr(ingest, "_office_to_pdf", _fake)
+    blocks = build_content_block("old.xls", b"legacy bytes")
+    assert called.get("yes") and blocks[0]["type"] == "document"
+
+
+def test_corrupt_xlsx_raises_ingest_error():
+    with pytest.raises(IngestError, match="Excel"):
+        build_content_block("broken.xlsx", b"not a zip at all")
