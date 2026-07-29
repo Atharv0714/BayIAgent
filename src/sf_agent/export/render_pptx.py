@@ -162,10 +162,15 @@ def _content_slide(prs: Presentation, s) -> None:
         slide.notes_slide.notes_text_frame.text = s.notes
 
 
-def render(model: DocumentModel, template: bytes | None = None) -> bytes:
+def render(
+    model: DocumentModel, template: bytes | None = None, template_mode: str = "theme"
+) -> bytes:
     # A user-uploaded template renders onto ITS theme + layouts (branded, native).
+    # template_mode="theme_and_headers" additionally keeps the template's own slide titles.
     if template:
-        return _render_on_template(model, template)
+        return _render_on_template(
+            model, template, keep_headers=(template_mode == "theme_and_headers")
+        )
 
     prs = Presentation()
     prs.slide_width = Emu(int(_SLIDE_W))
@@ -290,8 +295,38 @@ def _chart_as_bullets(chart: dict[str, Any]) -> list[str]:
     return [f"{lab}: {data[i] if i < len(data) else ''}" for i, lab in enumerate(labels)]
 
 
-def _render_on_template(model: DocumentModel, template: bytes) -> bytes:
+def _template_headers(prs: Presentation) -> list[str]:
+    """The template's own slide titles, in order, before its sample slides are dropped.
+
+    Used for template_mode="theme_and_headers", where the user asked to keep the uploaded
+    deck's section headings and not merely its look."""
+    headers: list[str] = []
+    for slide in prs.slides:
+        title = None
+        try:
+            if slide.shapes.title is not None:
+                title = (slide.shapes.title.text or "").strip()
+        except (AttributeError, ValueError):  # a layout without a title placeholder
+            title = None
+        if not title:
+            # Fall back to the topmost non-empty text box, which is the visual header.
+            texts = [
+                (float(getattr(sh, "top", 0) or 0), sh.text_frame.text.strip())
+                for sh in slide.shapes
+                if getattr(sh, "has_text_frame", False) and sh.text_frame.text.strip()
+            ]
+            if texts:
+                title = min(texts, key=lambda t: t[0])[1].splitlines()[0].strip()
+        if title:
+            headers.append(title[:120])
+    return headers
+
+
+def _render_on_template(
+    model: DocumentModel, template: bytes, keep_headers: bool = False
+) -> bytes:
     prs = Presentation(io.BytesIO(template))  # inherits the template's theme + layouts
+    headers = _template_headers(prs) if keep_headers else []
     _remove_all_slides(prs)
     title_layout, content_layout = _pick_layouts(prs)
 
@@ -299,8 +334,11 @@ def _render_on_template(model: DocumentModel, template: bytes) -> bytes:
     if model.summary and not model.slides:
         # Only add a stand-alone summary slide when there isn't already a deck of slides.
         _tpl_content_slide(prs, content_layout, "Summary", [model.summary])
-    for s in model.slides:
-        _tpl_content_slide(prs, content_layout, s.title, s.bullets, notes=s.notes)
+    for i, s in enumerate(model.slides):
+        # theme_and_headers: the uploaded deck's own heading for this position wins, so the
+        # new deck follows the template's section structure with our content underneath.
+        heading = headers[i] if (keep_headers and i < len(headers)) else s.title
+        _tpl_content_slide(prs, content_layout, heading, s.bullets, notes=s.notes)
     for table in model.tables:
         _tpl_content_slide(prs, content_layout, table.name, _table_as_bullets(table))
     if model.chart:

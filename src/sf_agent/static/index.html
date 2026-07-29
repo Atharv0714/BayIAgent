@@ -812,7 +812,10 @@ async function downloadExport(fmt, data, question) {
     method: "POST", headers: { "Content-Type": "application/json" },
     // template_id (when the answer was produced with an attached .pptx template) renders
     // the deck onto that template; ignored server-side for non-pptx or when expired.
-    body: JSON.stringify({ format: fmt, question, answer: data, template_id: data.template_id || null }),
+    // template_mode rides along so "same headers and theme" keeps the uploaded deck's
+    // section titles, while a bare "in the same theme" only inherits its look.
+    body: JSON.stringify({ format: fmt, question, answer: data,
+      template_id: data.template_id || null, template_mode: data.template_mode || "theme" }),
   });
   if (!r.ok) {
     let msg = "Export failed";

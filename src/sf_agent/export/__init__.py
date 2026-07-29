@@ -38,7 +38,12 @@ FORMATS: dict[str, tuple[str, str]] = {
 SUPPORTED_FORMATS = tuple(FORMATS)
 
 
-def render_document(model: DocumentModel, fmt: str, template: bytes | None = None) -> bytes:
+def render_document(
+    model: DocumentModel,
+    fmt: str,
+    template: bytes | None = None,
+    template_mode: str = "theme",
+) -> bytes:
     """Render ``model`` to the requested format, returning the file's bytes.
 
     Renderers are imported lazily so the package (and the web app) still load when a
@@ -51,7 +56,7 @@ def render_document(model: DocumentModel, fmt: str, template: bytes | None = Non
         raise ValueError(f"unsupported export format {fmt!r}")
     renderer = _renderer(fmt)
     if fmt == "pptx":
-        return renderer(model, template=template)
+        return renderer(model, template=template, template_mode=template_mode)
     return renderer(model)
 
 

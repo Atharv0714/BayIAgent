@@ -60,6 +60,7 @@ from sf_agent.ingest_store import (
     read_registry,
     write as ingest_write,
 )
+from sf_agent.export.intent import describe_upload_use
 from sf_agent.export import (
     FORMATS,
     answer_to_document,
@@ -108,18 +109,19 @@ class _State:
     # Per-owner enforcement config. Defaults keep today's behavior (no binding, all
     # rows shared) until the docs/sql migration is applied and ENFORCE_OWNERSHIP=true.
     auth_config: AuthConfig | None = None
-    # upload_id -> record for a file attached in the chat. `kind` is "template" (a
-    # .pptx/.potx carried to the renderer at export — record keeps "raw" bytes) or
-    # "context" (a doc the model reads — record keeps the prebuilt "block", not raw).
-    # In-memory, capped, per-process — like pending_ingests.
+    # upload_id -> record for a file attached in the chat. `kind` is "template" for a
+    # .pptx/.potx (record keeps "raw" for the renderer AND, when readable, a "block" so the
+    # model can read it too) or "context" for anything else (block only). The question, not
+    # the extension, decides how it is used. In-memory, capped, per-process.
     uploads: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
 
 STATE = _State()
 
-# Chat-attachment classification + retention. A PowerPoint upload is a DECK TEMPLATE
-# (used by the renderer, never sent to the model); anything else is CONTEXT the model
-# reads. Uploads are held in memory only, oldest evicted past these caps.
+# Chat-attachment retention. A .pptx/.potx is stored so it can serve EITHER role — its raw
+# bytes for rendering a deck onto its theme, and a content block so the model can also read
+# it — with each turn's question deciding which (see export.intent.describe_upload_use).
+# Anything else is context the model reads. Held in memory only, oldest evicted past the caps.
 _TEMPLATE_EXTS = {".pptx", ".potx"}
 _MAX_UPLOADS = 20
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file
@@ -438,7 +440,14 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
 
     ext = Path(filename).suffix.lower()
     if ext in _TEMPLATE_EXTS:
+        # A deck can serve EITHER role, so store both and let each turn's question choose:
+        # `raw` for rendering onto its theme, `block` so the model can also read it. Storing
+        # only the template is what made "summarize this deck" impossible.
         record: dict[str, Any] = {"filename": filename, "kind": "template", "raw": raw}
+        try:
+            record["block"] = file_content_block(filename, raw)
+        except Exception as e:  # noqa: BLE001 — readability is a bonus; template use still works
+            logger.info("web: deck %r not readable as context (%s); template use only", filename, e)
     else:
         # Context: build the model content block now (raises for unsupported types) so the
         # user gets an immediate 415, and so an Office file is converted to PDF only once.
@@ -1118,16 +1127,38 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
     # the shared read connection.
     attachments: list[dict[str, Any]] | None = None
     template_id: str | None = None
+    # "theme" (default) or "theme_and_headers" — see export.intent.detect_template_mode.
+    template_mode: str = "theme"
     if req.upload_id:
         up = STATE.uploads.get(req.upload_id)
         if up is None:
             return JSONResponse(
                 {"ok": False, "error": "Attached file expired — re-attach it."}, status_code=400
             )
-        if up.get("kind") == "template":
+        is_deck = up.get("kind") == "template"
+        use = describe_upload_use(question, is_deck)
+        if use["as_template"] and is_deck:
             template_id = req.upload_id
-        elif up.get("block") is not None:
+            template_mode = str(use["template_mode"])
+        if use["read"] and up.get("block") is not None:
             attachments = [up["block"]]
+
+    # When the attachment is a TEMPLATE, the renderer applies it — the model never sees the
+    # file. Say so, or the model reads "the slide I uploaded" as something to look up and goes
+    # hunting through the warehouse for it, then reports the deck as missing.
+    agent_question = question
+    if template_id and attachments is None:
+        reuse = (
+            "its theme and its slide headers"
+            if template_mode == "theme_and_headers"
+            else "its theme (fonts, colours, layouts)"
+        )
+        agent_question = (
+            f"{question}\n\n[System note: the user attached a PowerPoint template and the "
+            f"application will render your deck onto {reuse}. The file is handled outside this "
+            "conversation — do NOT search the warehouse for it and do not treat it as missing. "
+            "Just produce the deck content in values.slides.]"
+        )
 
     # Continue an existing chat, or start a new one. History is kept server-side so a
     # follow-up ("now analyze that") sees the earlier turns and their fetched rows.
@@ -1148,7 +1179,9 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             # route_and_answer classifies (database / followup / web / general) first, then
             # dispatches — so the answer carries the route + reason for transparency. An
             # attached context doc rides along as content blocks the model can read.
-            answer, updated = agent.route_and_answer(history, question, attachments=attachments)
+            answer, updated = agent.route_and_answer(
+                history, agent_question, attachments=attachments
+            )
             STATE.conversations[session_id] = updated
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
@@ -1181,6 +1214,9 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             # When a .pptx/.potx template was attached, echo its id so the UI passes it to
             # /api/export and the deck renders onto that template. None otherwise.
             "template_id": template_id,
+            # How much of the attached deck to reuse: "theme" (look only) or
+            # "theme_and_headers" (also its section titles). The UI passes it to /api/export.
+            "template_mode": template_mode,
         }
     )
 
@@ -1197,6 +1233,9 @@ class ExportRequest(BaseModel):
     # For a pptx: the upload_id of an attached .pptx/.potx template (from /api/upload) to
     # render the deck onto. Ignored for non-pptx formats and when the template has expired.
     template_id: str | None = None
+    # How much of that template to reuse: "theme" (masters, layouts, fonts, colours) or
+    # "theme_and_headers" (also its slide titles). /api/ask derives it from the question.
+    template_mode: str = "theme"
 
 
 def _export_slug(text: str) -> str:
@@ -1235,7 +1274,7 @@ def export(req: ExportRequest) -> Response:
 
     try:
         model = answer_to_document(req.answer, req.question)
-        data = render_document(model, fmt, template=template)
+        data = render_document(model, fmt, template=template, template_mode=req.template_mode)
     except Exception as e:  # noqa: BLE001 — surface render failures to the browser
         logger.exception("web: export failed fmt=%s", fmt)
         return JSONResponse({"ok": False, "error": f"Could not generate {fmt}: {e}"}, status_code=500)
