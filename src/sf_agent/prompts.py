@@ -63,18 +63,23 @@ discover tables or columns, query INFORMATION_SCHEMA.TABLES / .COLUMNS instead.
 `TO_CHAR(END_DATE,'YYYY-MM') = '2026-07'`, not string LIKE on the column.
 
 Domain rule — client names, revenue, and org charts (MASTERSKILLLIST specifics):
-- CONSOLIDATE CLIENT NAME VARIANTS by default. One company appears under several JOB_COMPANY \
-values for its branches and contract vehicles — e.g. 'Cisco', 'Cisco - SOW', 'Cisco - India', \
-'Cisco - Costa Rica'; 'Walmart', 'Walmart-SOW'. Unless the user asks for the breakdown, group \
-them into one company (e.g. `CASE WHEN JOB_COMPANY ILIKE 'cisco%' THEN 'Cisco' ...`, or group \
-on the name before the ' - ' / '-SOW' suffix) and say in "answer" that variants were merged. \
-A raw COUNT(DISTINCT JOB_COMPANY) OVERSTATES the client count — mention that when you report it.
-- EXCLUDE BayOne's own internal entries from any CLIENT count or client list: JOB_COMPANY \
-values like 'BayOne', 'Bayone Bench', 'Bayone Solutions Inc' are internal bench/overhead rows \
-(29 active rows), not customers. Filter them out (e.g. `JOB_COMPANY NOT ILIKE '%bayone%' AND \
-JOB_COMPANY NOT ILIKE '%bench%'`) whenever the question is about clients we serve, and never \
-present BayOne itself as one of its own clients. They still count as billable/bench headcount \
-when the question is about resources.
+- FOR ANY CLIENT-LEVEL QUESTION (how many clients, which clients, per-client totals, top \
+clients) QUERY THE VIEW `V_CLIENT_PLACEMENTS`, NOT `MASTERSKILLLIST` directly. It is \
+MASTERSKILLLIST plus two derived columns that settle client identity in SQL: \
+  * `CLIENT_NAME` — one canonical name per company, with branch and contract-vehicle variants \
+already merged ('Cisco', 'Cisco - SOW', 'Cisco - India', 'Cisco - Costa Rica' -> 'Cisco'; \
+'Walmart-SOW' -> 'Walmart'; 'eBay - CAD' -> 'eBay'; 'HPE' + 'Hewlett-Packard Enterprise (HPE)' \
+-> one client; 'Applied Materials_India' -> 'Applied Materials'; 'Rivian SOW' -> 'Rivian'). \
+  * `IS_INTERNAL` — TRUE for BayOne's own bench/overhead rows ('BayOne', 'Bayone Bench', \
+'Bayone Solutions Inc'), which are NOT customers. \
+So the canonical count is \
+`SELECT COUNT(DISTINCT CLIENT_NAME) FROM V_CLIENT_PLACEMENTS WHERE STATUS='Active' AND NOT IS_INTERNAL` \
+(currently 58). Do NOT hand-write your own CASE/REGEXP grouping for client names — doing that \
+produced a different total on every run. Group and filter on CLIENT_NAME / IS_INTERNAL instead, \
+and say in "answer" that variants were merged and internal rows excluded. Use the raw \
+JOB_COMPANY column only when the user explicitly wants the per-branch or per-SOW breakdown. \
+Internal rows still count as billable/bench headcount when the question is about resources \
+rather than clients.
 - There is NO revenue column. AGREEDBILLRATE and AGREEDPAYRATE are HOURLY rates and GM is a \
 margin figure, so booked revenue cannot be computed from this table. For "top clients by \
 revenue" style questions, rank by a stated proxy — SUM(AGREEDBILLRATE) over ACTIVE placements, \
