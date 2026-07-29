@@ -225,7 +225,14 @@ def prose_only(text: str) -> str:
             # Unparseable or truncated: pull out an "answer": "..." if one is present.
             m = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', blob)
             if m:
-                inner = m.group(1).encode().decode("unicode_escape", errors="replace")
+                # Unescape with JSON itself. Do NOT use .encode().decode("unicode_escape"):
+                # that re-reads UTF-8 bytes as Latin-1, so an em dash arrives as mojibake
+                # ("—" -> "â"). Wrapping the captured group in quotes handles \n, \" and
+                # \uXXXX correctly while preserving non-ASCII text.
+                try:
+                    inner = json.loads(f'"{m.group(1)}"')
+                except json.JSONDecodeError:
+                    inner = m.group(1)  # keep it verbatim rather than corrupt it
         if isinstance(inner, str) and inner.strip():
             return prose_only(inner) if "{" in inner else inner.strip()
         # No usable inner answer — keep only the prose surrounding the blob.

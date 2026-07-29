@@ -52,3 +52,24 @@ def test_keeps_prose_when_json_has_no_usable_answer():
 def test_empty_and_blank_are_safe():
     assert prose_only("") == ""
     assert prose_only("   \n  ") == ""
+
+
+def test_malformed_json_path_preserves_unicode_not_mojibake():
+    """The regex fallback must not corrupt non-ASCII text.
+
+    Observed in production: answers arrived with 'â' where an em dash belonged, because the
+    fallback did .encode().decode("unicode_escape") — that re-reads UTF-8 bytes as Latin-1,
+    so '—' (3 bytes) became 'â' plus junk. Only this path was affected, which is why answers
+    parsed by json.loads looked fine.
+    """
+    raw = 'Here: {"answer": "Two files — the RivianOrg section — excluded it.", "value": 1,'
+    out = prose_only(raw)
+    assert out == "Two files — the RivianOrg section — excluded it."
+    assert "â" not in out
+
+
+def test_malformed_json_path_handles_escapes_and_other_non_ascii():
+    assert prose_only('x {"answer": "em dash \\u2014 here", "value": 1,') == "em dash — here"
+    assert prose_only('x {"answer": "Café ✓ 6,000+ → 2,500", "value": 1,') == "Café ✓ 6,000+ → 2,500"
+    # Escaped quotes and newlines survive the unescape.
+    assert prose_only('x {"answer": "He said \\"hi\\"\\nnext", "value": 1,') == 'He said "hi"\nnext'
