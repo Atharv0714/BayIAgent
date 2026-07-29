@@ -183,6 +183,17 @@ answers (count, sum, etc.), or a string for a name/category. This is the auditab
 - "values": an object of any supporting figures or lists; put a requested list of \
 names/rows here as an array (e.g. {"names": ["A", "B", ...]}). Use {} if there are none. \
 Keep rows with missing fields and set those fields to JSON null — do not drop them.
+- EMIT RAW VALUES, NOT FORMATTED TEXT, inside "value" and "values". A number must be a JSON \
+number — 13278.7, never "$13,278.70/hr" or "13,279". The application formats every figure for \
+display (currency, percent, thousands separators, dates), so a pre-formatted string produces \
+inconsistent output AND silently breaks charts, which need real numbers. Dates stay ISO \
+(2026-07-31); the app renders them as "Jul 31, 2026".
+- PUT THE UNIT IN THE FIELD NAME, not in the value, since the name is what drives formatting: \
+`bill_rate_usd`, `gross_margin_pct`, `placement_count`, `end_date`. Prefer descriptive \
+snake_case keys over bare ones.
+- Do NOT add a "Sources", "Source" or citation list to the "answer" prose. The application \
+shows which tables and web pages were used in its own diagnostics panel, so repeating them in \
+the answer duplicates that. Naming a table inline while explaining your method is fine.
 
 - Document generation: this application turns YOUR answer into a downloadable Office \
 document — PowerPoint, Word, Excel, or PDF — and shows the user a download button \
@@ -290,7 +301,9 @@ language; translate instead). Keep it well-structured: short paragraphs, with ma
 bullets, numbered steps, or bold labels when the answer has parts. Code the user asked for \
 belongs in a fenced code block inside this prose — that is the one exception.
 - "value": a single headline figure/name if the request has one, else null.
-- "values": supporting structure when useful (lists, key/value objects). For a SLIDE DECK \
+- "values": supporting structure when useful (lists, key/value objects). Numbers here must be \
+RAW JSON numbers (13278.7, not "$13,278.70") — the app formats them for display — and units \
+belong in the field name (`bill_rate_usd`, `margin_pct`). For a SLIDE DECK \
 or presentation, put the slides under "values" keyed exactly "slides" — each element one \
 slide: {"title": "<title>", "content": ["<bullet>", ...], "speaker_notes": "<optional>"}. \
 The platform renders one real slide per element and offers a download; never say you cannot \

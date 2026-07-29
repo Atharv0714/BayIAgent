@@ -7,6 +7,7 @@ by real cells (so the chart stays live and editable, not a pasted image).
 
 from __future__ import annotations
 
+import datetime as _dt
 import io
 import re
 from typing import Any
@@ -17,6 +18,7 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
 from sf_agent.export.model import DocumentModel, cell_text, chart_series
+from sf_agent.formatting import DATE, classify_field, excel_number_format
 
 _ACCENT = "7C3AED"
 _MAX_COL_WIDTH = 60
@@ -47,15 +49,27 @@ def _autosize(ws, ncols: int) -> None:
         ws.column_dimensions[letter].width = min(max(width + 2, 10), _MAX_COL_WIDTH)
 
 
-def _xl_value(v: Any) -> Any:
-    """Keep numbers/bools native so Excel can sum/chart them; stringify the rest."""
+def _xl_value(v: Any, key: Any = None) -> Any:
+    """Keep values NATIVE so Excel can compute with them; stringify only what it can't.
+
+    Numbers and bools pass through. An ISO date under a date column is converted to a real
+    ``date`` — as a string Excel cannot sort, filter or chart it, and the cell's date number
+    format would have nothing to apply to.
+    """
     if v is None or v == "":
         return None
     if isinstance(v, (int, float, bool)):
         return v
-    if isinstance(v, str):
+    if isinstance(v, _dt.date):
         return v
-    return cell_text(v)
+    if isinstance(v, str):
+        if classify_field(key) == DATE:
+            try:
+                return _dt.date.fromisoformat(v.strip()[:10])
+            except ValueError:
+                return v
+        return v
+    return cell_text(v, key)
 
 
 def _write_table_sheet(wb: Workbook, name: str, columns: list[str], rows: list[list[Any]], used: set[str]) -> Any:
@@ -66,7 +80,22 @@ def _write_table_sheet(wb: Workbook, name: str, columns: list[str], rows: list[l
         cell.fill = _header_fill()
         cell.alignment = Alignment(vertical="center")
     for row in rows:
-        ws.append([_xl_value(v) for v in row])
+        ws.append([_xl_value(v, columns[i] if i < len(columns) else None) for i, v in enumerate(row)])
+    # Presentation goes in the cell's NUMBER FORMAT, not into a pre-formatted string, so the
+    # figures read like the screen ($13,278.70, Jul 31 2026) while staying real numbers that
+    # Excel can still sum, sort and chart. Applied per column from the header name.
+    for idx, column in enumerate(columns, start=1):
+        fmt = excel_number_format(column)
+        if not fmt:
+            continue
+        for cell in ws.iter_cols(min_col=idx, max_col=idx, min_row=2):
+            for c in cell:
+                # Dates are included: openpyxl stamps its own default date format on a date
+                # cell, which would otherwise override ours and show 2026-07-31 again.
+                if isinstance(c.value, (_dt.date, _dt.datetime)) or (
+                    isinstance(c.value, (int, float)) and not isinstance(c.value, bool)
+                ):
+                    c.number_format = fmt
     ws.freeze_panes = "A2"
     _autosize(ws, len(columns))
     return ws

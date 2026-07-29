@@ -395,7 +395,7 @@ function mdToHtml(text) {
 const ACRONYMS = new Set([
   "ID","SOW","PO","PTO","USA","US","UK","EU","HPE","KPI","SLA","API","SQL","URL","SSN",
   "DOB","ZIP","HR","IT","QA","VP","CEO","CTO","CFO","CIO","B2B","B2C","AI","ML","FTE",
-  "JD","EIN","W2","C2C","PII","CRM","ERP","SKU","YOY","MOM","YTD","MTD","NDA","RFP","RFQ",
+  "JD","EIN","W2","C2C","PII","CRM","ERP","SKU","YOY","MOM","YTD","MTD","NDA","RFP","RFQ", "USD","GM",
 ]);
 // Turn a raw field key ("CANDIDATE FULL NAME", "solutions_case_study") into an
 // English label ("Candidate Full Name", "Solutions Case Study"), keeping acronyms upper.
@@ -409,6 +409,111 @@ function humanize(k) {
     }).join(" ");
 }
 // Missing/null is flagged explicitly, never blanked out, so gaps in the data are visible.
+// ── Deterministic value formatting ──────────────────────────────────────────────────
+// Presentation is decided HERE, not by the model, so the same figure never renders three
+// different ways across runs. Mirrors src/sf_agent/formatting.py — change both together;
+// tests/test_formatting.py pins the shared cases.
+//
+// Type is inferred from the FIELD NAME because nothing upstream carries units. Matching is
+// TOKEN-based, never bare substring: 'candidate_name' contains "date", 'corporate_client'
+// contains "rate", and 'is_valid' ends in "id". Three rules come from the real data:
+//   * never append "/hr" — AGREEDPAYRATE mixes hourly (55.00) and annual (140000.00);
+//   * percents keep negatives and values over 100 — GM spans -89.50 to 118.60;
+//   * numeric identifiers are never grouped — COMPANYID must not become 1,234,567.
+const FALSE_FRIENDS = new Set(["candidate","candidates","update","updated","mandate","validate",
+  "consolidate","corporate","accurate","separate","generate","aggregate","moderate","duration",
+  "valid","invalid","paid","grid","hybrid"]);
+const PERCENT_TOKENS = new Set(["pct","percent","percentage","margin","margins","gm","share","ratio"]);
+const CURRENCY_TOKENS = new Set(["rate","rates","revenue","cost","costs","salary","price","spend",
+  "billing","amount","budget","billrate","payrate","agreedbillrate","agreedpayrate","runrate"]);
+const COUNT_TOKENS = new Set(["count","counts","headcount","placements","total","totals","num",
+  "qty","quantity","rows","people","consultants","clients","n"]);
+const DATE_TOKENS = new Set(["date","dates","day","month","year","period","at","start","end",
+  "started","ended","expiry","expires","since","until"]);
+const EXPLICIT_CURRENCY_TOKENS = new Set(["usd","dollar","dollars","amt"]);
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([ T].*)?$/;
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function fmtTokens(key) {
+  return String(key == null ? "" : key)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+function fmtHits(tokens, vocab) {
+  return tokens.some((t) => {
+    if (FALSE_FRIENDS.has(t)) return false;
+    if (vocab.has(t)) return true;
+    for (const w of vocab) if (w.length >= 3 && t.endsWith(w)) return true;
+    return false;
+  });
+}
+// "currency" | "percent" | "count" | "date" | "identifier" | "text"
+function classifyField(key) {
+  const raw = String(key == null ? "" : key).trim();
+  if (!raw) return "text";
+  const t = fmtTokens(raw);
+  if (!t.length) return "text";
+  if (t.includes("id") || /(^|_)id$/i.test(raw) ||
+      t.some((x) => x.endsWith("id") && x.length > 3 && !FALSE_FRIENDS.has(x))) return "identifier";
+  if (fmtHits(t, EXPLICIT_CURRENCY_TOKENS)) return "currency";  // margin_usd is money
+  if (fmtHits(t, PERCENT_TOKENS)) return "percent";             // rate_pct is a percent
+  if (fmtHits(t, CURRENCY_TOKENS)) return "currency";
+  if (fmtHits(t, COUNT_TOKENS)) return "count";
+  if (fmtHits(t, DATE_TOKENS)) return "date";
+  return "text";
+}
+// Locale pinned to en-US so output never varies by viewer (bare toLocaleString() did).
+function fmtGroup(n, dp) {
+  return n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+}
+function fmtTrim(s) { return s.includes(".") ? s.replace(/0+$/, "").replace(/\.$/, "") : s; }
+function fmtCurrency(n) { return (n < 0 ? "-" : "") + "$" + fmtGroup(Math.abs(n), 2); }
+function fmtPercent(n) { return fmtTrim(fmtGroup(n, 2)) + "%"; }
+function fmtCount(n) { return Number.isInteger(n) ? fmtGroup(n, 0) : fmtTrim(fmtGroup(n, 1)); }
+function fmtNumber(n) { return Number.isInteger(n) ? fmtGroup(n, 0) : fmtTrim(fmtGroup(n, 2)); }
+function fmtDate(v) {
+  const text = String(v).trim();
+  if (!ISO_DATE_RE.test(text)) return null;
+  const [y, m, d] = text.slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d || m > 12 || d > 31) return null;
+  return `${MONTHS[m - 1]} ${d}, ${y}`;
+}
+// The headline badge has no field name of its own. Borrow the key of whichever `values`
+// entry holds the same number (so a run-rate headline formats as currency like its table
+// does); otherwise fall back to a plain grouped number, never a guessed unit.
+function fmtHeadline(d) {
+  const v = d.value;
+  if (typeof v !== "number") return v;
+  const vals = d.values || {};
+  for (const [k, val] of Object.entries(vals)) {
+    if (val === v) return fmtValue(v, k) ?? String(v);
+    if (Array.isArray(val)) {
+      for (const row of val) {
+        if (isObj(row)) for (const [ck, cv] of Object.entries(row)) if (cv === v) return fmtValue(v, ck) ?? String(v);
+      }
+    } else if (isObj(val)) {
+      for (const [ck, cv] of Object.entries(val)) if (cv === v) return fmtValue(v, ck) ?? String(v);
+    }
+  }
+  return fmtNumber(v);
+}
+
+// The single entry point. Returns null when the value needs no special handling, so each
+// caller keeps its own convention for blanks ("missing" on screen, "—" in documents).
+function fmtValue(v, key) {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  const kind = classifyField(key);
+  if (kind === "identifier") return String(v);
+  if (kind === "date") { const d = fmtDate(v); if (d) return d; }
+  const n = typeof v === "number" ? v : (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v)) ? Number(v) : null);
+  if (n === null) return fmtDate(v);
+  if (kind === "currency") return fmtCurrency(n);
+  if (kind === "percent") return fmtPercent(n);
+  if (kind === "count") return fmtCount(n);
+  return fmtNumber(n);
+}
+
 const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
 
 // Render one cell value. Must handle NESTED structures: the agent's "values" often contain an
@@ -416,20 +521,24 @@ const isObj = (x) => x && typeof x === "object" && !Array.isArray(x);
 // client carrying a per-region breakdown). esc() alone would stringify those as
 // "[object Object]", which is what users were seeing. Recurses so any depth stays readable,
 // with a JSON fallback as a backstop.
-function cell(v, depth = 0) {
+function cell(v, depth = 0, key = null) {
   if (v === null || v === undefined || v === "") return `<span class="vempty">missing</span>`;
   if (typeof v === "boolean") return v ? "Yes" : "No";
+  // Numbers and dates are formatted deterministically from the field name (see fmtValue),
+  // so 13278.7 reads $13,278.70 and 2026-07-31 reads Jul 31, 2026 — the same everywhere.
+  const formatted = fmtValue(v, key);
+  if (formatted !== null && typeof v !== "object") return esc(formatted);
   if (depth > 3) { try { return esc(JSON.stringify(v)); } catch { return esc(String(v)); } }
   if (Array.isArray(v)) {
     if (!v.length) return `<span class="vempty">none</span>`;
     // Objects stack on their own lines; scalars read as a comma list.
     return v.some(isObj)
-      ? v.map((x) => cell(x, depth + 1)).join("<br>")
-      : v.map((x) => cell(x, depth + 1)).join(", ");
+      ? v.map((x) => cell(x, depth + 1, key)).join("<br>")
+      : v.map((x) => cell(x, depth + 1, key)).join(", ");
   }
   if (isObj(v)) {
     const parts = Object.entries(v).map(([k, iv]) =>
-      `<span class="kvp"><span class="kvk">${esc(humanize(k))}:</span> ${cell(iv, depth + 1)}</span>`);
+      `<span class="kvp"><span class="kvk">${esc(humanize(k))}:</span> ${cell(iv, depth + 1, k)}</span>`);
     return parts.join(" · ") || `<span class="vempty">none</span>`;
   }
   return esc(v);
@@ -437,24 +546,25 @@ function cell(v, depth = 0) {
 
 // Render a supporting value by shape: a list of row objects becomes a real table,
 // a single object a key/value table, a scalar list a readable line, a scalar plain text.
-function renderValue(v) {
+function renderValue(v, key = null) {
   if (v === null || v === undefined || v === "") return `<p class="vscalar vempty">missing</p>`;
   if (Array.isArray(v)) {
     if (!v.length) return `<p class="vscalar vempty">missing</p>`;
     if (v.every(isObj)) {
       const cols = [...new Set(v.flatMap((r) => Object.keys(r)))];
       const head = cols.map((c) => `<th>${esc(humanize(c))}</th>`).join("");
-      const body = v.map((r) => `<tr>${cols.map((c) => `<td>${cell(r[c])}</td>`).join("")}</tr>`).join("");
+      const body = v.map((r) => `<tr>${cols.map((c) => `<td>${cell(r[c], 0, c)}</td>`).join("")}</tr>`).join("");
       return `<div class="vscroll"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
     }
-    return `<p class="vscalar">${v.map((item) => cell(item)).join(v.some(isObj) ? "<br>" : ", ")}</p>`;
+    return `<p class="vscalar">${v.map((item) => cell(item, 0, key)).join(v.some(isObj) ? "<br>" : ", ")}</p>`;
   }
   if (isObj(v)) {
     const rows = Object.entries(v).map(([k, iv]) =>
-      `<tr><td class="k">${esc(humanize(k))}</td><td>${cell(iv)}</td></tr>`).join("");
+      `<tr><td class="k">${esc(humanize(k))}</td><td>${cell(iv, 0, k)}</td></tr>`).join("");
     return `<table class="data kv"><tbody>${rows}</tbody></table>`;
   }
-  return `<p class="vscalar">${esc(v)}</p>`;
+  // Second raw-scalar path: a top-level scalar supporting value bypassed cell() entirely.
+  return `<p class="vscalar">${cell(v, 0, key)}</p>`;
 }
 
 // Map the agent's normalized chart spec {type, title, labels, series, ...} to a
@@ -469,10 +579,20 @@ function chartConfig(spec) {
     legend: { display: wantLegend, labels: { color: MUTED } },
     title: { display: !!spec.title, text: spec.title || "", color: INK, font: { size: 14 } },
   };
+  // Axis + tooltip numbers go through the same formatter as the tables, keyed off the axis
+  // label, so a chart never disagrees with the figures printed beside it.
+  const vkey = spec.y_label || spec.title || "";
+  const tick = (val) => { const f = fmtValue(val, vkey); return f === null ? val : f; };
   const axes = {
     x: { title: { display: !!spec.x_label, text: spec.x_label || "", color: MUTED }, ticks: { color: MUTED }, grid: { color: GRID } },
-    y: { beginAtZero: true, title: { display: !!spec.y_label, text: spec.y_label || "", color: MUTED }, ticks: { color: MUTED }, grid: { color: GRID } },
+    y: { beginAtZero: true, title: { display: !!spec.y_label, text: spec.y_label || "", color: MUTED },
+         ticks: { color: MUTED, callback: tick }, grid: { color: GRID } },
   };
+  plugins.tooltip = { callbacks: { label: (c) => {
+    const raw = (c.parsed && c.parsed.y !== undefined && c.parsed.y !== null) ? c.parsed.y : c.parsed;
+    const f = fmtValue(raw, vkey);
+    return `${c.dataset.label ? c.dataset.label + ": " : ""}${f === null ? raw : f}`;
+  } } };
   const base = { responsive: true, maintainAspectRatio: false, plugins };
 
   if (t === "pie" || t === "doughnut") {
@@ -635,7 +755,7 @@ function botInner(d) {
   if (!d.ok) return `<p class="answer">${esc(d.error)}</p>`;
   html += routePill(d);
   if (d.value !== null && d.value !== undefined && d.value !== "")
-    html += `<div class="badge">${esc(d.value)}</div>`;
+    html += `<div class="badge">${esc(fmtHeadline(d))}</div>`;
   html += `<div class="answer">${mdToHtml(d.answer)}</div>`;
   if (d.chart && typeof d.chart === "object") {
     const id = `chart_${chartSeq++}`;
@@ -646,9 +766,8 @@ function botInner(d) {
   if (Object.keys(vals).length) {
     html += `<div class="klabel">Supporting values</div>`;
     for (const [k, v] of Object.entries(vals))
-      html += `<div class="vsection"><div class="vname">${esc(humanize(k))}</div>${renderValue(v)}</div>`;
+      html += `<div class="vsection"><div class="vname">${esc(humanize(k))}</div>${renderValue(v, k)}</div>`;
   }
-  html += citations(d);
   const sql = d.executed_sql || [];
   if (sql.length) {
     html += `<details><summary>Executed SQL (${sql.length})</summary>`;
@@ -746,13 +865,24 @@ function diagnostics(d) {
     rows.push(["Time taken", (d.elapsed_ms / 1000).toFixed(1) + " s"]);
   const src = (d.sources && d.sources.length) ? d.sources.join(", ") : (d.tool || "agent");
   rows.push(["Source", src]);
+  // Provenance lives HERE only: warehouse tables above, web pages below. The answer body
+  // stays clean prose, so every response has the same shape whatever route produced it.
+  const cites = d.citations || [];
+  if (cites.length) {
+    const links = cites.map((c) => {
+      const label = esc(c.title || c.url || "source");
+      return c.url ? `<li><a href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${label}</a></li>` : `<li>${label}</li>`;
+    }).join("");
+    rows.push(["Sources", `<ul class="cites">${links}</ul>`, true]);
+  }
   const tk = d.tokens || {};
   if (tk.total)
-    rows.push(["Tokens used", `${tk.total.toLocaleString()} total — ${(tk.input || 0).toLocaleString()} in, `
-      + `${(tk.output || 0).toLocaleString()} out, ${((tk.cache_read || 0) + (tk.cache_write || 0)).toLocaleString()} cache`]);
+    rows.push(["Tokens used", `${fmtCount(tk.total)} total — ${fmtCount(tk.input || 0)} in, `
+      + `${fmtCount(tk.output || 0)} out, ${fmtCount((tk.cache_read || 0) + (tk.cache_write || 0))} cache`]);
   const cost = fmtCost(d.cost_usd);
   if (cost) rows.push(["Token cost", cost]);
-  const body = rows.map(([k, v]) => `<tr><td class="k">${esc(k)}</td><td>${esc(v)}</td></tr>`).join("");
+  const body = rows.map(([k, v, isHtml]) =>
+    `<tr><td class="k">${esc(k)}</td><td>${isHtml ? v : esc(v)}</td></tr>`).join("");
   return `<details class="diag"><summary>Diagnostics · via ${esc(d.tool || "agent")}</summary>`
     + `<table class="data kv"><tbody>${body}</tbody></table></details>`;
 }

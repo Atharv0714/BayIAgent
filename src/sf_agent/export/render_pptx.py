@@ -113,7 +113,7 @@ def _table_slide(prs: Presentation, table: Table) -> None:
     for ri, row in enumerate(rows, start=1):
         for ci in range(ncols):
             cell = tbl.cell(ri, ci)
-            cell.text = cell_text(row[ci]) if ci < len(row) else ""
+            cell.text = cell_text(row[ci], cols[ci] if ci < len(cols) else None) if ci < len(row) else ""
             cell.text_frame.paragraphs[0].font.size = Pt(10)
 
 
@@ -277,7 +277,7 @@ def _table_as_bullets(table: Table) -> list[str]:
     """One bullet per row (col: value · col: value), capped — keeps it on-template."""
     out: list[str] = []
     for row in table.rows[:_MAX_ROWS]:
-        pairs = [f"{table.columns[i]}: {cell_text(v)}" for i, v in enumerate(row) if i < len(table.columns)]
+        pairs = [f"{table.columns[i]}: {cell_text(v, table.columns[i])}" for i, v in enumerate(row) if i < len(table.columns)]
         out.append(" · ".join(pairs))
     return out
 

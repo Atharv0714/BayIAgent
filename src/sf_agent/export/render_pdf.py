@@ -66,7 +66,7 @@ def _flow_table(table: Table, st: dict[str, ParagraphStyle], avail_w: float) -> 
     data = [header]
     for row in table.rows:
         data.append([
-            Paragraph(cell_text(row[i]) if i < len(row) else "", st["cell"])
+            Paragraph(cell_text(row[i], cols[i] if i < len(cols) else None) if i < len(row) else "", st["cell"])
             for i in range(ncols)
         ])
     col_w = avail_w / ncols

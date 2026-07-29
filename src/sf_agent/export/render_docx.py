@@ -46,7 +46,7 @@ def _add_table(doc: Document, table: Table) -> None:
     for row in table.rows:
         cells = t.add_row().cells
         for i in range(ncols):
-            cells[i].text = cell_text(row[i]) if i < len(row) else ""
+            cells[i].text = cell_text(row[i], table.columns[i] if i < len(table.columns) else None) if i < len(row) else ""
             for para in cells[i].paragraphs:
                 for run in para.runs:
                     run.font.size = Pt(9)

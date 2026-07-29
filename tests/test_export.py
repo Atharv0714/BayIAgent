@@ -1,5 +1,6 @@
 """Export module: answer -> document mapping and each renderer producing a valid file."""
 
+import datetime as dt
 import io
 
 import pytest
@@ -208,3 +209,52 @@ def test_document_summary_and_slides_are_plain_text():
     assert s.notes == "Cite exactly."
     # And it survives into a real file.
     assert render_document(model, "pptx")[:2] == b"PK"
+
+
+# --- consistent formatting reaches the documents ----------------------------------------
+_FMT_ANSWER = {
+    "answer": "Top clients by billing run-rate.",
+    "value": 13278.7,
+    "values": {
+        "top_clients": [
+            {"client_name": "Google", "run_rate_usd": 13278.7, "gm": 12.46,
+             "placement_count": 145, "end_date": "2026-07-31", "companyid": 1234567},
+            {"client_name": "Cisco", "run_rate_usd": 3439.74, "gm": -89.5,
+             "placement_count": 85, "end_date": "2026-12-31", "companyid": 7654321},
+        ],
+        "annual_salary": 140000,
+    },
+    "sources": ["V_CLIENT_PLACEMENTS"],
+}
+
+
+def test_docx_figures_match_the_screen_formatting():
+    from docx import Document
+
+    model = answer_to_document(_FMT_ANSWER, "Top clients by revenue")
+    doc = Document(io.BytesIO(render_document(model, "docx")))
+    text = " ".join(c.text for t in doc.tables for r in t.rows for c in r.cells)
+    assert "$13,278.70" in text          # currency grouped, 2dp
+    assert "12.46%" in text and "-89.5%" in text   # percent, negatives intact
+    assert "Jul 31, 2026" in text        # date humanised
+    assert "2026-07-31" not in text      # ...and the raw ISO form is gone
+    assert "1234567" in text and "1,234,567" not in text  # identifiers never grouped
+    assert "/hr" not in text             # no invented rate unit
+
+
+def test_xlsx_keeps_values_native_so_excel_can_compute():
+    """The workbook must stay numeric — presentation goes in the cell number format."""
+    from openpyxl import load_workbook
+
+    model = answer_to_document(_FMT_ANSWER, "Top clients by revenue")
+    ws = load_workbook(io.BytesIO(render_document(model, "xlsx")))["Top Clients"]
+    header = [c.value for c in ws[1]]
+    cells = {name: ws.cell(2, header.index(name) + 1) for name in header}
+
+    assert isinstance(cells["Run Rate USD"].value, float)
+    assert cells["Run Rate USD"].number_format == '"$"#,##0.00'
+    assert isinstance(cells["Placement Count"].value, int)
+    # An ISO date becomes a real date, or Excel cannot sort/filter/chart it.
+    assert isinstance(cells["End Date"].value, (dt.date, dt.datetime))
+    assert cells["End Date"].number_format == "mmm d, yyyy"
+    assert cells["Companyid"].number_format == "0"

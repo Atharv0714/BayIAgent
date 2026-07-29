@@ -17,13 +17,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from sf_agent.formatting import format_value
+
 # Abbreviations kept upper-case in humanized labels; mirrors the ACRONYMS set in
 # static/index.html so column headings read identically on screen and in exports.
 _ACRONYMS = {
     "ID", "SOW", "PO", "PTO", "USA", "US", "UK", "EU", "HPE", "KPI", "SLA", "API",
     "SQL", "URL", "SSN", "DOB", "ZIP", "HR", "IT", "QA", "VP", "CEO", "CTO", "CFO",
     "CIO", "B2B", "B2C", "AI", "ML", "FTE", "JD", "EIN", "W2", "C2C", "PII", "CRM",
-    "ERP", "SKU", "YOY", "MOM", "YTD", "MTD", "NDA", "RFP", "RFQ",
+    "ERP", "SKU", "YOY", "MOM", "YTD", "MTD", "NDA", "RFP", "RFQ", "USD", "GM", "SOW",
 }
 
 
@@ -102,9 +104,14 @@ def strip_markdown(text: Any) -> str:
     return s.strip()
 
 
-def cell_text(v: Any) -> str:
+def cell_text(v: Any, key: Any = None) -> str:
     """Display string for a cell. None/blank becomes an em dash so gaps stay visible
-    (never silently dropped); dicts/lists serialize compactly."""
+    (never silently dropped); dicts/lists serialize compactly.
+
+    ``key`` is the field/column name. When given, numbers and dates are formatted by the
+    shared rules in ``sf_agent.formatting`` so a generated document reads exactly like the
+    screen ($13,278.70 rather than 13278.7, Jul 31, 2026 rather than 2026-07-31). Callers pass
+    the humanized column header, which tokenizes the same way as the raw column name."""
     if v is None or v == "":
         return "—"
     if isinstance(v, bool):
@@ -113,7 +120,8 @@ def cell_text(v: Any) -> str:
         import json
 
         return json.dumps(v, default=str, ensure_ascii=False)
-    return str(v)
+    formatted = format_value(v, key)
+    return formatted if formatted is not None else str(v)
 
 
 def _is_obj(x: Any) -> bool:
