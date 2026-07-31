@@ -205,10 +205,32 @@ _SUBTITLE_TYPES = {PP_PLACEHOLDER.SUBTITLE, PP_PLACEHOLDER.BODY}
 
 
 def _remove_all_slides(prs: Presentation) -> None:
-    """Drop the template's own sample slides, keeping its masters/layouts/theme."""
-    lst = prs.slides._sldIdLst
-    for sld in list(lst):
-        lst.remove(sld)
+    """Drop the template's own sample slides, keeping its masters/layouts/theme.
+
+    Removing the ``<p:sldId>`` entries alone is NOT enough, and the difference is what makes
+    PowerPoint offer to "repair" the generated deck. The presentation part keeps its
+    relationship to each old slide, so those slide parts — and the notes pages and images
+    they own — stay reachable and get written to the .pptx. Meanwhile python-pptx allocates
+    the next slide partname as ``slide{len(sldIdLst) + 1}.xml``, and sldIdLst is now empty, so
+    the new slides are handed the SAME partnames. The saved package then contains two
+    ``ppt/slides/slide1.xml`` entries, plus orphan notesSlides claiming slides that point at a
+    different notes page — a slide with two notes pages is exactly what PowerPoint rejects.
+
+    So drop each slide's own relationships first (its notes page, its pictures), then the
+    presentation's relationship to the slide, and only then the sldIdLst entry. Parts still
+    reachable elsewhere — layouts via the master, a logo shared with a layout — survive, since
+    the package is serialized by walking relationships.
+    """
+    sldIdLst = prs.slides._sldIdLst
+    pres_part = prs.part
+    for sldId in list(sldIdLst):
+        rId = sldId.rId
+        slide_part = pres_part.related_part(rId)
+        for rel_id, rel in list(slide_part.rels.items()):
+            if not rel.is_external:
+                slide_part.rels.pop(rel_id)
+        sldIdLst.remove(sldId)
+        pres_part.rels.pop(rId)
 
 
 def _ph_of_type(shapes_holder, types: set) -> Any:
