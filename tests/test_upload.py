@@ -70,6 +70,20 @@ def test_upload_text_is_context_and_stores_block():
     assert rec["kind"] == "context" and rec["block"]["type"] == "text" and "raw" not in rec
 
 
+def test_upload_reports_capabilities_not_one_fixed_role():
+    """The response must say what a file CAN be used for, not commit it to a role.
+
+    The UI labelled every .pptx "Template" because /api/upload returned only the internal
+    ``kind``. The role is decided per question (describe_upload_use), so the response carries
+    capability flags and the chip shows a neutral "Deck"/"Document".
+    """
+    deck = _body(_upload("brand.pptx", _pptx_bytes()))
+    assert deck["can_template"] is True and deck["readable"] is True
+
+    doc = _body(_upload("brief.txt", b"BayOne retail brief"))
+    assert doc["can_template"] is False and doc["readable"] is True
+
+
 def test_upload_empty_file_400():
     resp = _upload("empty.txt", b"")
     assert resp.status_code == 400

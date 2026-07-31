@@ -206,7 +206,7 @@
     font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #fff;
     background: var(--bo-purple); border-radius: 6px; padding: 1px 6px; font-weight: 700;
   }
-  .attach-pill .ap-kind.template { background: var(--bo-magenta); }
+  .attach-pill .ap-kind.deck { background: var(--bo-magenta); }
   .attach-pill .ap-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
   .attach-pill .ap-x { border: 0; background: transparent; color: var(--muted); font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1; }
   .attach-pill .ap-x:hover { color: var(--danger); }
@@ -280,11 +280,11 @@
       <div id="attachChip" class="attach-chip" style="display:none"></div>
       <div class="composer">
         <input id="attachInput" type="file" hidden />
-        <button id="attachBtn" title="Attach a file (a PowerPoint template, or a document to read)">📎</button>
+        <button id="attachBtn" title="Attach a file — read as context, or used as a deck template; your question decides">📎</button>
         <textarea id="q" rows="1" placeholder="Ask a question — then follow up to analyze the result…"></textarea>
         <button class="primary" id="send">Send</button>
       </div>
-      <div class="hint">Enter to send · Shift+Enter for newline · attach a .pptx template or a document to read</div>
+      <div class="hint">Enter to send · Shift+Enter for newline · attach a file — a deck to restyle from, or a document to read</div>
     </footer>
   </div>
 </div>
@@ -294,7 +294,8 @@ const $ = (s) => document.querySelector(s);
 const threadEl = $("#thread"), qEl = $("#q"), sendBtn = $("#send"), newChatBtn = $("#newChat"), pdfBtn = $("#pdfBtn");
 const attachBtn = $("#attachBtn"), attachInput = $("#attachInput"), attachChip = $("#attachChip");
 // The file attached to the NEXT message: {upload_id, filename, kind} or null. kind is
-// "template" (a .pptx/.potx rendered onto at export) or "context" (a doc the model reads).
+// The server reports capabilities, not one fixed role: can_template (a .pptx/.potx that can be
+// rendered onto at export) and readable (the model can read it). The question picks the role per turn.
 let pendingUpload = null;
 // The agent always runs in Auto mode — it decides per question whether to use semantic
 // search (Cortex Analyst) or raw SQL — so there's no query-method picker in the UI.
@@ -895,7 +896,7 @@ function renderMessage(m, idx) {
   if (m.role === "user") {
     wrap.className = "msg user";
     const att = m.attachment
-      ? `<div class="msg-attach">📎 ${esc(m.attachment.filename)}${m.attachment.kind === "template" ? " (template)" : ""}</div>`
+      ? `<div class="msg-attach">📎 ${esc(m.attachment.filename)}</div>`
       : "";
     wrap.innerHTML = `<div class="bubble">${esc(m.text)}${att}</div>`;
   } else {
@@ -929,16 +930,22 @@ function renderAll() {
 // Show (or clear) the pending-attachment chip above the composer.
 function renderAttachChip() {
   if (!pendingUpload) { attachChip.style.display = "none"; attachChip.innerHTML = ""; return; }
-  const isTpl = pendingUpload.kind === "template";
+  // A deck can style a new deck OR be read as content — the QUESTION decides, per turn.
+  // So the chip must not assert one role; it reports what the file can be used for.
+  const isDeck = pendingUpload.can_template;
+  const label = isDeck ? "Deck" : "Document";
+  const hint = isDeck
+    ? "Used as a deck template, or read as content — whichever your question asks for"
+    : "Read as context for your question";
   attachChip.style.display = "";
-  attachChip.innerHTML = `<span class="attach-pill">`
-    + `<span class="ap-kind ${isTpl ? "template" : ""}">${isTpl ? "Template" : "Context"}</span>`
+  attachChip.innerHTML = `<span class="attach-pill" title="${esc(hint)}">`
+    + `<span class="ap-kind ${isDeck ? "deck" : ""}">${esc(label)}</span>`
     + `<span class="ap-name">${esc(pendingUpload.filename)}</span>`
     + `<button class="ap-x" title="Remove attachment">×</button></span>`;
 }
 function clearAttach() { pendingUpload = null; attachInput.value = ""; renderAttachChip(); }
 
-// Upload a chosen file: the server classifies it (template vs context) and holds it,
+// Upload a chosen file: the server holds it and reports what it can be used for,
 // returning an upload_id the next send() references.
 async function uploadFile(file) {
   if (!file || busy) return;
@@ -948,7 +955,8 @@ async function uploadFile(file) {
     const r = await fetch("/api/upload", { method: "POST", body: fd });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || "Upload failed");
-    pendingUpload = { upload_id: data.upload_id, filename: data.filename, kind: data.kind };
+    pendingUpload = { upload_id: data.upload_id, filename: data.filename, kind: data.kind,
+                      can_template: !!data.can_template, readable: !!data.readable };
     renderAttachChip();
   } catch (e) {
     alert("Could not attach file: " + (e && e.message ? e.message : e));

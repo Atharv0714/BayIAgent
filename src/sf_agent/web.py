@@ -465,7 +465,17 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
     with _LOCK:
         _remember_upload(upload_id, record)
     return JSONResponse(
-        {"ok": True, "upload_id": upload_id, "filename": filename, "kind": record["kind"]}
+        {
+            "ok": True,
+            "upload_id": upload_id,
+            "filename": filename,
+            "kind": record["kind"],
+            # A deck is not committed to one role at upload time: the question decides whether
+            # it styles a new deck, is read as content, or both. Report what it CAN do so the
+            # UI stops asserting "Template" on every .pptx.
+            "can_template": record["kind"] == "template",
+            "readable": record.get("block") is not None,
+        }
     )
 
 
