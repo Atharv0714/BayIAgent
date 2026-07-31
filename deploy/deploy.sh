@@ -73,13 +73,24 @@ info "subscription: $(az account show --query name -o tsv)"
 # ==============================================================================
 if [[ "$CODE_ONLY" == false ]]; then
 
-step "Resource group: $RESOURCE_GROUP ($LOCATION)"
-az group create --name "$RESOURCE_GROUP" --location "$LOCATION" -o none
+step "Resource group: $RESOURCE_GROUP"
+# Do NOT blindly create: BayIAgent already exists in westus while the plan and app
+# live in centralus, and `az group create` rejects a location mismatch outright. A
+# resource group's location is only metadata for the group object — resources
+# inside it can live anywhere — so reuse whatever is there.
+if az group show --name "$RESOURCE_GROUP" -o none 2>/dev/null; then
+    info "exists in $(az group show --name "$RESOURCE_GROUP" --query location -o tsv) — reusing"
+else
+    az group create --name "$RESOURCE_GROUP" --location "$LOCATION" -o none
+fi
 
 step "Verifying Python $PYTHON_VERSION is still offered on Linux App Service"
 # App Service retires runtimes independently of upstream Python. Fail loudly here
 # rather than with an opaque error after the plan is already billing.
-if ! az webapp list-runtimes --os-type linux -o tsv | grep -qi "^PYTHON:${PYTHON_VERSION}$"; then
+# `az webapp list-runtimes -o tsv` emits "PYTHON|3.11<TAB>2027-10-31<TAB>..." — a PIPE
+# and trailing columns, not "PYTHON:3.11". Matching the colon form declared a
+# perfectly available runtime missing and aborted the deploy.
+if ! az webapp list-runtimes --os-type linux -o tsv | grep -qi "^PYTHON|${PYTHON_VERSION}\b"; then
     info "available Python runtimes:"
     az webapp list-runtimes --os-type linux -o tsv | grep -i '^PYTHON' | sed 's/^/      /'
     die "PYTHON:${PYTHON_VERSION} is not offered. Pick a supported version and set PYTHON_VERSION."
@@ -159,6 +170,7 @@ kv() { echo "@Microsoft.KeyVault(SecretUri=${VAULT_URI}/secrets/$1/)"; }
 step "Checking required secrets exist in $VAULT_NAME"
 REQUIRED_SECRETS=(
     anthropic-api-key
+    ingest-vision-api-key
     snowflake-account
     snowflake-user
     snowflake-pat
@@ -194,6 +206,7 @@ az webapp config appsettings set \
     --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" -o none \
     --settings \
     "ANTHROPIC_API_KEY=$(kv anthropic-api-key)" \
+    "INGEST_VISION_API_KEY=$(kv ingest-vision-api-key)" \
     "SNOWFLAKE_ACCOUNT=$(kv snowflake-account)" \
     "SNOWFLAKE_USER=$(kv snowflake-user)" \
     "SNOWFLAKE_PAT=$(kv snowflake-pat)" \
@@ -207,11 +220,13 @@ az webapp config appsettings set \
     "CORTEX_SEMANTIC_VIEW=${CORTEX_SEMANTIC_VIEW:?}" \
     "SF_ROW_CAP=${SF_ROW_CAP:-200}" \
     "CORTEX_TIMEOUT_S=${CORTEX_TIMEOUT_S:-60}" \
-    "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}" \
-    "AGENT_MODEL=${AGENT_MODEL:-claude-sonnet-4-6}" \
+    "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:?}" \
+    "AGENT_MODEL=${AGENT_MODEL:?}" \
     "AGENT_MAX_ROUNDS=${AGENT_MAX_ROUNDS:-8}" \
     "AGENT_MAX_TOKENS=${AGENT_MAX_TOKENS:-8192}" \
     "INGEST_MAX_TOKENS=${INGEST_MAX_TOKENS:-128000}" \
+    "INGEST_VISION_MODEL=${INGEST_VISION_MODEL:?}" \
+    "CORTEX_ENABLED=${CORTEX_ENABLED:-false}" \
     "ENFORCE_OWNERSHIP=${ENFORCE_OWNERSHIP}" \
     "CALLER_SESSION_VAR=BAYI_CALLER" \
     "PROTECTED_SESSION_VAR=BAYI_PROTECTED" \
@@ -230,9 +245,12 @@ az webapp config appsettings set \
 step "Platform settings: HTTPS-only, Always On, startup command"
 az webapp update --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
     --https-only true -o none
+# Startup command is RELATIVE. Oryx packages the build as output.tar.zst and the
+# platform extracts it to a temp dir, so /home/site/wwwroot/startup.sh does not
+# exist at runtime — the absolute form exits 127 on every container start.
 az webapp config set --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
     --always-on true \
-    --startup-file "/home/site/wwwroot/startup.sh" \
+    --startup-file "bash startup.sh" \
     --ftps-state Disabled -o none
 
 step "Enabling application logging"
@@ -261,8 +279,11 @@ fi
 info "package: $(du -h "$ZIP" | cut -f1), $(unzip -l "$ZIP" | tail -1 | awk '{print $2}') files"
 
 step "Deploying (Oryx will install requirements.txt — this takes a few minutes)"
-az webapp deploy --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
-    --src-path "$ZIP" --type zip --async false -o none
+# `az webapp deploy` posts to /api/publish, which does NOT trigger an Oryx build
+# even with SCM_DO_BUILD_DURING_DEPLOYMENT=true — the app then starts with no
+# virtualenv and no gunicorn. `config-zip` posts to /api/zipdeploy, which does.
+az webapp deployment source config-zip --name "$APP_NAME" \
+    --resource-group "$RESOURCE_GROUP" --src "$ZIP" -o none
 rm -f "$ZIP"
 
 step "Restarting"

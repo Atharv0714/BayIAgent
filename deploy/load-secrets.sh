@@ -81,7 +81,12 @@ set_secret() {
 }
 
 step "Reading credentials from $ENV_FILE"
+# ANTHROPIC_API_KEY is the Z.AI key (the query lane runs GLM through Anthropic's
+# compatible endpoint); INGEST_VISION_API_KEY is the real Anthropic key used only
+# by the document-vision lane. Two different providers, two different secrets —
+# swapping them silently breaks either queries or document ingest.
 set_secret anthropic-api-key "$(read_env ANTHROPIC_API_KEY)"
+set_secret ingest-vision-api-key "$(read_env INGEST_VISION_API_KEY)"
 set_secret snowflake-account "$(read_env SNOWFLAKE_ACCOUNT)"
 set_secret snowflake-user    "$(read_env SNOWFLAKE_USER)"
 set_secret snowflake-pat     "$(read_env SNOWFLAKE_PAT)"

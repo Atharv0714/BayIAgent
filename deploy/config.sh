@@ -39,15 +39,27 @@ SF_ROW_CAP="200"
 CORTEX_SEMANTIC_VIEW="BAYONE_INTERNALINFO.PUBLIC.BILLABLE_SEMANTIC"
 CORTEX_TIMEOUT_S="60"
 
-# ── Agent loop ───────────────────────────────────────────────────────────────
-# Endpoint base URL. Blank = Anthropic (default). For Z.AI GLM set
-# ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic", point the anthropic-api-key Key
-# Vault secret at the Z.AI key, and set AGENT_MODEL="glm-5.2".
-ANTHROPIC_BASE_URL=""
-AGENT_MODEL="claude-sonnet-4-6"
+# ── Agent loop / model provider ──────────────────────────────────────────────
+# The query lane runs GLM on Z.AI through Anthropic's compatible endpoint — much
+# cheaper per question than Claude. ANTHROPIC_API_KEY therefore holds the Z.AI
+# key, NOT an Anthropic key.
+ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+AGENT_MODEL="glm-5.2"
 AGENT_MAX_ROUNDS="8"
 AGENT_MAX_TOKENS="8192"
 INGEST_MAX_TOKENS="128000"
+
+# ── Document-vision lane ─────────────────────────────────────────────────────
+# GLM cannot read PDFs/Office files, so ingest of those routes to a provider with
+# real document vision (Anthropic) while ordinary queries stay on the cheap one.
+# INGEST_VISION_API_KEY is the *Anthropic* key and lives in Key Vault separately.
+# Leave INGEST_VISION_BASE_URL unset to use Anthropic's default endpoint.
+INGEST_VISION_MODEL="claude-sonnet-4-6"
+
+# ── Cortex Analyst ───────────────────────────────────────────────────────────
+# Disabled: the semantic view route was turned off in favour of the SQL agent.
+# SNOWFLAKE_PAT stays in Key Vault so re-enabling is a one-line change.
+CORTEX_ENABLED="false"
 
 # ── Auth / enforcement ───────────────────────────────────────────────────────
 # Object ID (GUID) of the group gating the 'protected' tier. Entra emits group
