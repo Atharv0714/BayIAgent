@@ -4,13 +4,22 @@ These exercise pure logic (JSON parsing, usage folding, citation extraction) wit
 network, so they run without Snowflake or Anthropic creds.
 """
 
+import json
 from types import SimpleNamespace
 
-from sf_agent.agent import _extract_web, _merge_usage
+from sf_agent.agent import (
+    _FINAL_ANSWER_INSTRUCTION,
+    _INTERNAL_TURNS,
+    _extract_web,
+    _merge_usage,
+    trim_history,
+)
+from sf_agent.prompts import FOLLOWUP_GUIDANCE
 from sf_agent.router import (
     ROUTE_DATABASE,
     ROUTE_FOLLOWUP,
     ROUTE_WEB,
+    conversation_digest,
     parse_route,
     usage_from,
 )
@@ -127,3 +136,116 @@ def test_extract_web_no_citations_returns_empty_list():
     text, cites = _extract_web([_text_block("just text")])
     assert text == "just text"
     assert cites == []
+
+
+# --- conversation digest: what the router is allowed to see ----------------------
+# The router's job includes deciding whether a question "can be answered ENTIRELY from
+# results already shown", but it used to receive only a has_history boolean — it never saw
+# the results. So it spotted a follow-up only by wording, and a self-contained question
+# ("Who is the CIO at Rivian?" right after the Rivian org chart was displayed) went back to
+# the warehouse for data already on screen. The digest is what closes that gap.
+
+
+def _text(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="text", text=text)
+
+
+def _answered(question: str, payload: dict) -> list[dict]:
+    """One complete turn as converse() leaves it in the history."""
+    return [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": [SimpleNamespace(type="tool_use", text=None)]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "{}"}]},
+        {"role": "assistant", "content": [_text(json.dumps(payload))]},
+    ]
+
+
+def test_digest_reports_questions_answers_and_available_data():
+    history = _answered(
+        "List the top 5 clients by active placements.",
+        {"answer": "Google leads with 145.", "value": 145, "values": {"top_clients": [1, 2]}},
+    )
+    digest = conversation_digest(history)
+    assert "List the top 5 clients by active placements." in digest
+    assert "Google leads with 145." in digest
+    assert "145" in digest  # the headline value the next question may ask about
+    assert "top_clients" in digest  # so the router knows which rows are still on screen
+
+
+def test_digest_omits_the_agents_own_scaffolding_turns():
+    """FOLLOWUP_GUIDANCE and the final-answer instruction are appended as user turns; they
+    are protocol chatter, and letting them through would read as things the user asked."""
+    history = [
+        {"role": "user", "content": "How many consultants?"},
+        {"role": "user", "content": FOLLOWUP_GUIDANCE},
+        {"role": "user", "content": _FINAL_ANSWER_INSTRUCTION},
+        {"role": "assistant", "content": [_text('{"answer": "There are 22.", "value": 22}')]},
+    ]
+    digest = conversation_digest(history, internal_turns=_INTERNAL_TURNS)
+    assert "How many consultants?" in digest
+    assert "FOLLOW-UP question" not in digest
+    assert "cannot call any more tools" not in digest
+
+
+def test_digest_is_empty_until_something_has_been_answered():
+    # Empty means "no history" to the caller, which then tells the router this is turn one.
+    assert conversation_digest([]) == ""
+    assert conversation_digest([{"role": "user", "content": "hi"}]) == ""
+    # An assistant turn that only called a tool is not an answer the user saw.
+    assert conversation_digest(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [SimpleNamespace(type="tool_use", text=None)]},
+        ]
+    ) == ""
+
+
+def test_digest_keeps_only_the_most_recent_turns():
+    history = []
+    for i in range(10):
+        history += _answered(f"question {i}", {"answer": f"answer {i}"})
+    digest = conversation_digest(history, max_turns=3)
+    assert "question 9" in digest and "question 8" in digest and "question 7" in digest
+    assert "question 6" not in digest
+
+
+def test_digest_survives_malformed_assistant_turns():
+    history = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": [_text("I'll look that up.")]},  # prose, no JSON
+        {"role": "user", "content": "q2"},
+        {"role": "assistant", "content": [_text("{not json at all}")]},
+        {"role": "user", "content": "q3"},
+        {"role": "assistant", "content": [_text('{"answer": "real answer"}')]},
+    ]
+    digest = conversation_digest(history)
+    assert "real answer" in digest and "q3" in digest
+    assert "I'll look that up." not in digest
+
+
+# --- history trimming: bound what each turn re-sends ------------------------------
+
+
+def test_trim_history_keeps_recent_turns_and_never_orphans_a_tool_result():
+    """Every turn re-sends the whole transcript, so it has to be bounded. The cut must land
+    on a turn boundary: a tool_result separated from its tool_use is an API error."""
+    history = []
+    for i in range(8):
+        history += _answered(f"question {i}", {"answer": f"answer {i}"})
+
+    trimmed = trim_history(history, max_turns=3)
+    texts = [m["content"] for m in trimmed if isinstance(m.get("content"), str)]
+    assert texts == ["question 5", "question 6", "question 7"]
+    # First message starts a turn, so no tool_result is left dangling.
+    assert trimmed[0]["role"] == "user" and isinstance(trimmed[0]["content"], str)
+    for i, m in enumerate(trimmed):
+        content = m.get("content")
+        if isinstance(content, list) and content and isinstance(content[0], dict) \
+                and content[0].get("type") == "tool_result":
+            prev = trimmed[i - 1]
+            assert prev["role"] == "assistant", "tool_result must follow its tool_use"
+
+
+def test_trim_history_leaves_a_short_conversation_untouched():
+    history = _answered("only question", {"answer": "only answer"})
+    assert trim_history(history, max_turns=12) is history

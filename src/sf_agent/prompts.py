@@ -240,8 +240,23 @@ If you could not answer from the data, set "value" to null and explain why in "a
 # call). Bias toward "database" for anything that plausibly needs internal data (that
 # path is grounded); use "general" for ordinary assistant requests that need no data.
 ROUTER_SYSTEM = """You route questions for BayI, BayOne's internal assistant. Classify the \
-user's LATEST question into exactly one route:
+user's LATEST question into exactly one route.
 
+You are shown an excerpt of what has ALREADY been asked and answered in this conversation. \
+That excerpt is the user's screen: whatever it contains, the user is already looking at. \
+Check it FIRST, before anything else — if the facts the latest question needs are already \
+there, the answer is "followup" and no new lookup is needed.
+
+- "followup": every fact the question needs is ALREADY VISIBLE in the excerpt above. \
+Re-sorting, filtering, reformatting, charting, explaining, or summarizing data already \
+retrieved — but ALSO any plain question whose answer simply appears in a previous answer. \
+The wording does not matter: a question can be phrased as a brand-new, self-contained \
+request, with no "that"/"those"/"it", and still be a follow-up. "Who is the CIO at Rivian?" \
+right after the Rivian org chart was displayed is a FOLLOW-UP, because the answer is on \
+screen. Ask yourself literally: using only the excerpt above, could I answer this? If yes -> \
+"followup". Re-querying data the user can already see wastes their time and money, so prefer \
+"followup" whenever the excerpt covers the question. Only reject it when the question needs a \
+fact, column, row, entity, or time period the excerpt does not contain.
 - "database": needs facts or numbers from the BayOne Snowflake warehouse — placements, \
 bill rates, gross margin, candidates, skills, clients, BayOne's own capabilities/services, \
 or delivered case studies. Any request for counts, lists, sums, averages, group-bys, or \
@@ -254,11 +269,8 @@ titles, levels — e.g. Rivian and Lam Research), so "what is the org structure 
 "show me the <client> org chart", "who are the key stakeholders / decision makers at \
 <client>", and "who does <person> report to" are DATABASE questions, not web or general. \
 They read our own ingested records about that client, not the public internet. Route them to \
-"database" even though the company is external.
-- "followup": can be answered ENTIRELY from results already shown earlier in this \
-conversation — re-sorting, filtering, reformatting, explaining, charting, or summarizing \
-data that was already retrieved. Only choose this when prior results exist AND no new data \
-is needed.
+"database" even though the company is external — UNLESS that org chart is already in the \
+excerpt above, in which case it is a "followup".
 - "web": needs CURRENT or external information not in the warehouse and not general \
 knowledge — company news, live financials, funding, market data, or recent facts about \
 outside people/companies that must be looked up on the open internet right now.
@@ -267,7 +279,8 @@ warehouse data and no live lookup — explanations, definitions, drafting/writin
 brainstorming, coding help, formatting, summarizing text the user provided, or casual \
 conversation. This is the right route for ordinary assistant requests.
 
-Decision aid: does it need BayOne's internal records? -> database. Does it need something \
+Decision aid, in this order: is it already answered in the excerpt above? -> followup. \
+Otherwise, does it need BayOne's internal records? -> database. Does it need something \
 looked up on the internet right now? -> web. Otherwise, if you can just answer it -> general.
 
 Reply with ONLY a JSON object, no prose and no code fences:

@@ -88,8 +88,10 @@ class _State:
     agents: dict[str, SnowflakeAgent] = {}
     errors: dict[str, str] = {}  # tool -> why it's unavailable
     # session_id -> running message history (SDK content blocks), kept server-side
-    # so follow-ups can analyze data already fetched in earlier turns.
-    conversations: dict[str, list[Any]] = {}
+    # so follow-ups can analyze data already fetched in earlier turns. Ordered and capped:
+    # every session ever opened used to be retained for the life of the process, so a
+    # long-running server accumulated transcripts (and their row payloads) forever.
+    conversations: "OrderedDict[str, list[Any]]" = OrderedDict()
     # Write-capable connection for the ingest load path (separate creds/role); None
     # when SNOWFLAKE_INGEST_* isn't configured, in which case commit is unavailable.
     ingest_connection: SnowflakeConnection | None = None
@@ -125,6 +127,19 @@ STATE = _State()
 _TEMPLATE_EXTS = {".pptx", ".potx"}
 _MAX_UPLOADS = 20
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file
+
+
+# Conversations retained in memory. Well beyond any single user's working set, but finite,
+# so the store cannot grow without bound while the server runs.
+_MAX_CONVERSATIONS = 200
+
+
+def _remember_conversation(session_id: str, messages: list[Any]) -> None:
+    """Store a session's history, evicting the least recently used past the cap."""
+    STATE.conversations[session_id] = messages
+    STATE.conversations.move_to_end(session_id)
+    while len(STATE.conversations) > _MAX_CONVERSATIONS:
+        STATE.conversations.popitem(last=False)
 
 
 def _remember_upload(upload_id: str, record: dict[str, Any]) -> None:
@@ -1186,13 +1201,15 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
                     auth.protected_session_var: "true" if is_protected else "false",
                 })
             history = STATE.conversations.get(session_id, [])
+            if session_id in STATE.conversations:
+                STATE.conversations.move_to_end(session_id)
             # route_and_answer classifies (database / followup / web / general) first, then
             # dispatches — so the answer carries the route + reason for transparency. An
             # attached context doc rides along as content blocks the model can read.
             answer, updated = agent.route_and_answer(
                 history, agent_question, attachments=attachments
             )
-            STATE.conversations[session_id] = updated
+            _remember_conversation(session_id, updated)
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
         return JSONResponse({"ok": False, "error": f"The agent could not answer: {e}"}, status_code=502)

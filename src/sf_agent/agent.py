@@ -12,7 +12,14 @@ import anthropic
 
 from sf_agent.config import AgentConfig
 from sf_agent.prompts import FOLLOWUP_GUIDANCE, GENERAL_SYSTEM, SYSTEM_PROMPT, WEB_SYSTEM
-from sf_agent.router import ROUTE_FOLLOWUP, ROUTE_GENERAL, ROUTE_WEB, classify, usage_from
+from sf_agent.router import (
+    ROUTE_FOLLOWUP,
+    ROUTE_GENERAL,
+    ROUTE_WEB,
+    classify,
+    conversation_digest,
+    usage_from,
+)
 from sf_agent.tools.base import Tool
 from sf_agent.types import AgentAnswer, ToolResult
 from sf_agent.web_search import WebSearchError, zai_search_answer
@@ -37,6 +44,50 @@ _FINAL_ANSWER_INSTRUCTION = (
     "code fences. Put any list of names or supporting figures inside \"values\"; keep "
     "\"answer\" to one or two sentences."
 )
+
+# The scaffolding turns above are appended to the message history as ordinary user turns.
+# They are the agent's own protocol chatter, not anything the user asked, so the router's
+# conversation digest filters them out and reports only real questions and answers.
+_INTERNAL_TURNS = frozenset({_PROTOCOL_REMINDER, _FINAL_ANSWER_INSTRUCTION, FOLLOWUP_GUIDANCE})
+
+# How much conversation to carry forward. Every turn re-sends the entire history, including
+# the row payloads earlier queries returned, so an unbounded transcript makes each turn cost
+# more than the one before it. The cap is deliberately generous: prompt caching makes
+# re-sending a stable prefix cheap, and trimming invalidates that cache, so this exists to
+# bound a runaway transcript, not to shave tokens off an ordinary chat.
+_MAX_HISTORY_TURNS = 12
+
+
+def _starts_a_turn(message: dict[str, Any]) -> bool:
+    """Is this message the start of a user turn, and therefore a safe place to cut?
+
+    A tool_result message is NOT: dropping everything before it would orphan it from the
+    tool_use that produced it, and the API rejects a tool_result with no matching call.
+    """
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return True
+    if isinstance(content, list) and content:
+        first = content[0]
+        kind = getattr(first, "type", None) or (first.get("type") if isinstance(first, dict) else "")
+        return kind == "text"
+    return False
+
+
+def trim_history(
+    messages: list[dict[str, Any]], max_turns: int = _MAX_HISTORY_TURNS
+) -> list[dict[str, Any]]:
+    """Keep the most recent ``max_turns`` user turns, dropping whole turns from the front.
+
+    Cuts only at a turn boundary so a tool_result is never separated from its tool_use.
+    Returns the list unchanged when it is already short enough.
+    """
+    starts = [i for i, m in enumerate(messages) if _starts_a_turn(m)]
+    if len(starts) <= max_turns:
+        return messages
+    return messages[starts[-max_turns] :]
 
 
 class AgentError(RuntimeError):
@@ -479,8 +530,14 @@ class SnowflakeAgent:
         answer so the UI can show how each question was handled, and the router's token cost
         is folded into the answer's diagnostics.
         """
+        # Hand the router what has actually been asked and answered, not a bare
+        # "history: yes/no" — it cannot recognise that an answer is already on screen
+        # without seeing the screen.
         decision, router_usage = classify(
-            self._client, self._config.model, question, bool(history)
+            self._client,
+            self._config.model,
+            question,
+            conversation_digest(history, internal_turns=_INTERNAL_TURNS),
         )
         if decision.route == ROUTE_WEB:
             answer, updated = self._answer_web(history, question)
@@ -500,7 +557,9 @@ class SnowflakeAgent:
         answer.route_reason = decision.reason
         _merge_usage(answer, router_usage, self._config.model)
         logger.info("routed q=%r -> %s (%s)", question, decision.route, decision.reason)
-        return answer, updated
+        # Bound what the next turn will re-send. Only the chat path goes through here; the
+        # evals call converse() directly and keep their full transcript.
+        return answer, trim_history(updated)
 
     def _answer_web(
         self, history: list[dict[str, Any]], question: str
