@@ -7,7 +7,7 @@ import json
 import posixpath
 
 import pytest
-from fastapi import UploadFile
+from fastapi import Request, UploadFile
 
 from sf_agent.ingest import IngestError, file_content_block
 from sf_agent.web import ExportRequest, STATE, export, upload
@@ -28,8 +28,16 @@ def _pptx_bytes() -> bytes:
     return buf.getvalue()
 
 
-def _upload(filename: str, data: bytes):
-    return asyncio.run(upload(UploadFile(file=io.BytesIO(data), filename=filename)))
+def _request(identity: str | None = None):
+    """A bare ASGI request, optionally carrying an Easy Auth identity header."""
+    headers = [(b"x-ms-client-principal-name", identity.encode())] if identity else []
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": headers})
+
+
+def _upload(filename: str, data: bytes, identity: str | None = None):
+    return asyncio.run(
+        upload(_request(identity), UploadFile(file=io.BytesIO(data), filename=filename))
+    )
 
 
 def _body(resp) -> dict:
@@ -105,7 +113,7 @@ def test_export_pptx_with_template_id_renders():
         answer={"answer": "x", "values": {"slides": [{"title": "A", "content": ["b"]}]}},
         template_id="tpl1",
     )
-    resp = export(req)
+    resp = export(req, _request())
     assert resp.status_code == 200
     assert bytes(resp.body)[:2] == b"PK"  # a valid pptx/zip
 
@@ -118,7 +126,7 @@ def test_export_missing_template_id_falls_back():
         answer={"answer": "x", "values": {"slides": [{"title": "A", "content": ["b"]}]}},
         template_id="does-not-exist",
     )
-    resp = export(req)
+    resp = export(req, _request())
     assert resp.status_code == 200
     assert bytes(resp.body)[:2] == b"PK"
 

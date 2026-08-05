@@ -93,6 +93,12 @@ class _State:
     # every session ever opened used to be retained for the life of the process, so a
     # long-running server accumulated transcripts (and their row payloads) forever.
     conversations: "OrderedDict[str, list[Any]]" = OrderedDict()
+    # session_id / upload_id -> the identity that created it, or None when it was created
+    # with no identity resolved. Kept beside the stores rather than inside them so the
+    # payload shapes (a message list, an upload record) stay exactly what their consumers
+    # expect. See _owns() for the access rule.
+    conversation_owners: dict[str, str | None] = {}
+    upload_owners: dict[str, str | None] = {}
     # Write-capable connection for the ingest load path (separate creds/role); None
     # when SNOWFLAKE_INGEST_* isn't configured, in which case commit is unavailable.
     ingest_connection: SnowflakeConnection | None = None
@@ -135,28 +141,97 @@ _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file
 _MAX_CONVERSATIONS = 200
 
 
-def _remember_conversation(session_id: str, messages: list[Any]) -> None:
+# ── Who may reach a server-side conversation or upload ─────────────────────────────────
+# Both stores are keyed by a random id and were readable by anyone who presented that id:
+# a second user replaying another user's session_id got their history — including rows the
+# Snowflake row-access policy had released to THEM — and could reset it. The ids are UUID4
+# and never appear in a URL, so this was never remotely enumerable; the point is that
+# isolation rested on a secret token when the app already knows who is calling, so any leak
+# of an id (a HAR file, a devtools screenshot, an App Service log) became a read of someone
+# else's conversation.
+#
+# An owner of None means "created with no identity resolved" — no sign-in in front of the
+# app, and no dev override. Those stay open to everyone, so a deployment with no identity
+# behaves exactly as it did before. The gate arrives with the identity, not with a flag.
+
+
+def _session_owner(request: Request) -> str | None:
+    """The identity that should own a conversation or upload created by this request.
+
+    Deliberately NOT gated on ``enforce_ownership``. That flag governs which warehouse ROWS
+    a query may read, and turning it on also requires the Snowflake migration to be applied.
+    Keeping one user out of another's chat memory is a different, cheaper guarantee: it needs
+    no SQL, and gating it behind that flag would leave the app's default deployment — where
+    ENFORCE_OWNERSHIP is false — with no isolation at all. Where no identity is resolvable
+    this returns None and everything behaves exactly as it did before.
+    """
+    return _caller_identity(request)
+
+
+def _owns(owner: str | None, caller: str | None) -> bool:
+    """May ``caller`` use a resource created by ``owner``?
+
+    Unowned resources are open. An owned one requires an exact match, so an anonymous
+    caller cannot reach a resource created by a signed-in user.
+    """
+    return owner is None or owner == caller
+
+
+def _forbidden() -> JSONResponse:
+    """The response for a resource the caller does not own.
+
+    404, not 403: a 403 confirms the id exists, which tells an attacker holding a guessed or
+    leaked id that they found something real. Indistinguishable from an expired id.
+    """
+    return JSONResponse({"ok": False, "error": "Not found."}, status_code=404)
+
+
+def _remember_conversation(session_id: str, messages: list[Any], owner: str | None) -> None:
     """Store a session's history, evicting the least recently used past the cap."""
     STATE.conversations[session_id] = messages
     STATE.conversations.move_to_end(session_id)
+    # setdefault: the owner is whoever CREATED the session. A later turn cannot re-stamp it,
+    # so a session started while signed in never becomes claimable by anyone else.
+    STATE.conversation_owners.setdefault(session_id, owner)
     while len(STATE.conversations) > _MAX_CONVERSATIONS:
-        STATE.conversations.popitem(last=False)
+        evicted, _ = STATE.conversations.popitem(last=False)
+        STATE.conversation_owners.pop(evicted, None)
 
 
-def _remember_upload(upload_id: str, record: dict[str, Any]) -> None:
+def _remember_upload(upload_id: str, record: dict[str, Any], owner: str | None) -> None:
     """Store an upload record, evicting the oldest entries past the count cap (LRU-ish)."""
     STATE.uploads[upload_id] = record
     STATE.uploads.move_to_end(upload_id)
+    STATE.upload_owners.setdefault(upload_id, owner)
     while len(STATE.uploads) > _MAX_UPLOADS:
-        STATE.uploads.popitem(last=False)
+        evicted, _ = STATE.uploads.popitem(last=False)
+        STATE.upload_owners.pop(evicted, None)
+
+
+_FALLBACK_AUTH: AuthConfig | None = None
+
+
+def _auth_settings() -> AuthConfig:
+    """Auth settings, falling back to defaults when startup has not populated STATE yet.
+
+    Identity resolution used to give up whenever ``STATE.auth_config`` was unset, which now
+    fails OPEN: an unresolved identity leaves every conversation unowned and therefore shared.
+    Startup always sets it, but a request that arrives before initialisation finishes — or
+    after it raised partway — must not quietly lose session isolation. Every field has a safe
+    default, so constructing one never raises.
+    """
+    global _FALLBACK_AUTH
+    if STATE.auth_config is not None:
+        return STATE.auth_config
+    if _FALLBACK_AUTH is None:
+        _FALLBACK_AUTH = AuthConfig()  # type: ignore[call-arg]
+    return _FALLBACK_AUTH
 
 
 def _caller_identity(request: Request) -> str | None:
     """Resolve the calling user's identity from the Azure Easy Auth header, falling
     back to the dev override when running locally. Returns None when neither is set."""
-    cfg = STATE.auth_config
-    if cfg is None:
-        return None
+    cfg = _auth_settings()
     header = request.headers.get(cfg.easy_auth_header)
     if header and header.strip():
         return header.strip()
@@ -436,7 +511,7 @@ def index() -> FileResponse:
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...)) -> JSONResponse:
+async def upload(request: Request, file: UploadFile = File(...)) -> JSONResponse:
     """Accept one file attached in the chat and hold it server-side for this session.
 
     Classifies it: a PowerPoint (.pptx/.potx) is a deck TEMPLATE (used by the renderer at
@@ -479,7 +554,7 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
 
     upload_id = uuid.uuid4().hex
     with _LOCK:
-        _remember_upload(upload_id, record)
+        _remember_upload(upload_id, record, _session_owner(request))
     return JSONResponse(
         {
             "ok": True,
@@ -1161,6 +1236,8 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             return JSONResponse(
                 {"ok": False, "error": "Attached file expired — re-attach it."}, status_code=400
             )
+        if not _owns(STATE.upload_owners.get(req.upload_id), _session_owner(request)):
+            return _forbidden()
         is_deck = up.get("kind") == "template"
         use = describe_upload_use(question, is_deck)
         if use["as_template"] and is_deck:
@@ -1190,6 +1267,12 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
     # follow-up ("now analyze that") sees the earlier turns and their fetched rows.
     session_id = req.session_id or uuid.uuid4().hex
 
+    # Refuse another user's session before doing any work: its history holds rows the
+    # warehouse released to THEM, so replaying the id would hand them over.
+    caller = _session_owner(request)
+    if not _owns(STATE.conversation_owners.get(session_id), caller):
+        return _forbidden()
+
     try:
         with _LOCK:
             # Bind the caller identity + protected-group flag into the Snowflake session
@@ -1210,7 +1293,7 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             answer, updated = agent.route_and_answer(
                 history, agent_question, attachments=attachments
             )
-            _remember_conversation(session_id, updated)
+            _remember_conversation(session_id, updated, caller)
     except AgentError as e:
         logger.warning("web: agent could not answer q=%r err=%s", question, e)
         return JSONResponse({"ok": False, "error": f"The agent could not answer: {e}"}, status_code=502)
@@ -1329,7 +1412,7 @@ def _export_slug(text: str) -> str:
 
 
 @app.post("/api/export")
-def export(req: ExportRequest) -> Response:
+def export(req: ExportRequest, request: Request) -> Response:
     """Render one grounded answer into a downloadable native document.
 
     The client posts the answer it already holds (no new model call, no re-query) plus a
@@ -1349,6 +1432,8 @@ def export(req: ExportRequest) -> Response:
     # id; a missing/expired template just falls back to the built-in default deck.
     template: bytes | None = None
     if req.template_id and fmt == "pptx":
+        if not _owns(STATE.upload_owners.get(req.template_id), _session_owner(request)):
+            return _forbidden()
         up = STATE.uploads.get(req.template_id)
         if up is not None and up.get("kind") == "template":
             template = up.get("raw")
@@ -1370,10 +1455,17 @@ def export(req: ExportRequest) -> Response:
 
 
 @app.post("/api/reset")
-def reset(req: AskRequest) -> JSONResponse:
-    """Drop a chat's server-side history so its memory is freed (New chat)."""
+def reset(req: AskRequest, request: Request) -> JSONResponse:
+    """Drop a chat's server-side history so its memory is freed (New chat).
+
+    Guarded like the read paths: this is destructive, so without a check anyone holding a
+    session id could wipe another user's conversation memory mid-chat.
+    """
     if req.session_id:
+        if not _owns(STATE.conversation_owners.get(req.session_id), _session_owner(request)):
+            return _forbidden()
         STATE.conversations.pop(req.session_id, None)
+        STATE.conversation_owners.pop(req.session_id, None)
     return JSONResponse({"ok": True})
 
 
