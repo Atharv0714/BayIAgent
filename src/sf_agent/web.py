@@ -60,6 +60,7 @@ from sf_agent.ingest_store import (
     read_registry,
     write as ingest_write,
 )
+from sf_agent import feedback as feedback_store
 from sf_agent.export.intent import describe_upload_use
 from sf_agent.export import (
     FORMATS,
@@ -1263,6 +1264,59 @@ class ExportRequest(BaseModel):
     # How much of that template to reuse: "theme" (masters, layouts, fonts, colours) or
     # "theme_and_headers" (also its slide titles). /api/ask derives it from the question.
     template_mode: str = "theme"
+
+
+class FeedbackRequest(BaseModel):
+    """One answer's quality rating: 1 (deepest frown) to 5 (smile with teeth)."""
+
+    score: int
+    session_id: str
+    # Index of the rated answer within that session, so re-rating supersedes cleanly.
+    turn: int
+    # Context the client already holds, sent so the file can answer "which lane scores
+    # badly, and was a low score just a slow or costly answer?" without a second lookup.
+    route: str | None = None
+    elapsed_ms: float | None = None
+    cost_usd: float | None = None
+    question: str | None = None
+
+
+@app.post("/api/feedback")
+def feedback(req: FeedbackRequest, request: Request) -> JSONResponse:
+    """Record how good an answer was. Appends one row; never rewrites the file.
+
+    The caller's identity is taken from the request, not the body — a client cannot rate
+    as somebody else. Everything else is telemetry the client already has on screen.
+    """
+    auth = STATE.auth_config
+    rated_by = _caller_identity(request) if (auth and auth.enforce_ownership) else None
+    try:
+        row = feedback_store.record(
+            score=req.score,
+            session_id=req.session_id,
+            turn=req.turn,
+            route=req.route,
+            elapsed_ms=req.elapsed_ms,
+            cost_usd=req.cost_usd,
+            rated_by=rated_by,
+            question=req.question,
+        )
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    except OSError as e:  # disk full / read-only mount — never break the chat over telemetry
+        logger.warning("feedback: could not write rating: %s", e)
+        return JSONResponse({"ok": False, "error": "Could not save rating."}, status_code=503)
+    return JSONResponse({"ok": True, "score": row["score"]})
+
+
+@app.get("/api/feedback/summary")
+def feedback_summary() -> JSONResponse:
+    """How the agent is scoring so far: count, average, distribution, and split by route."""
+    try:
+        return JSONResponse({"ok": True, **feedback_store.summarize()})
+    except OSError as e:
+        logger.warning("feedback: could not read ratings: %s", e)
+        return JSONResponse({"ok": False, "error": "Could not read ratings."}, status_code=503)
 
 
 def _export_slug(text: str) -> str:

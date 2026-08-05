@@ -30,3 +30,4 @@ deck/
 
 # Scratch: files the bridge cannot delete
 _to_delete/
+.feedback/

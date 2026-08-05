@@ -231,6 +231,21 @@
     background: linear-gradient(135deg, var(--bo-purple), var(--bo-magenta) 60%, var(--bo-pink));
   }
   .exbtn.exgen:hover { color: #fff; filter: brightness(1.05); }
+
+  /* Per-answer rating: five faces, worst to best, stored server-side as 1-5. */
+  .ratebar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .ratebtn {
+    background: transparent; border: 1px solid transparent; border-radius: 999px;
+    padding: 3px 6px; font-size: 19px; line-height: 1.15; cursor: pointer;
+    filter: grayscale(1); opacity: .45; transition: opacity .12s, filter .12s, transform .12s;
+  }
+  .ratebtn:hover { filter: grayscale(0); opacity: 1; transform: scale(1.15); }
+  /* The chosen face stays in colour; the rest fade back so the score reads at a glance. */
+  .ratebtn.picked { filter: grayscale(0); opacity: 1; border-color: var(--vborder); background: var(--panel2); }
+  .ratebar.done .ratebtn:not(.picked) { opacity: .25; }
+  .ratebtn:disabled { cursor: default; transform: none; }
+  .ratethanks { color: var(--muted); font-size: 11.5px; margin-left: 6px; font-family: var(--display); font-weight: 600; }
+  .ratethanks.err { color: var(--danger); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@2.3.0/dist/chartjs-chart-treemap.min.js"></script>
@@ -712,9 +727,34 @@ const ROUTES = {
   general: { label: "General", desc: "Answered directly, with no lookup" },
 };
 
-function botInner(d) {
+// The five faces, worst to best. Only the SCORE is sent to the server — the emoji is
+// presentation, and one digit says everything four bytes of emoji would.
+const RATINGS = [
+  { score: 1, face: "😞", label: "Bad" },
+  { score: 2, face: "🙁", label: "Poor" },
+  { score: 3, face: "😐", label: "Okay" },
+  { score: 4, face: "🙂", label: "Good" },
+  { score: 5, face: "😀", label: "Great" },
+];
+
+// Rate-this-answer row. `picked` is the score already given for this answer (kept on the
+// message so it survives a re-render and the saved-chat round-trip), so reopening a chat
+// shows what you scored rather than an empty row.
+function rateBar(picked) {
+  const buttons = RATINGS.map((r) =>
+    `<button class="ratebtn${r.score === picked ? " picked" : ""}" data-score="${r.score}"`
+    + ` title="${esc(r.label)}" aria-label="${esc(r.label)} (${r.score} of 5)">${r.face}</button>`
+  ).join("");
+  return `<div class="ratebar${picked ? " done" : ""}">`
+    + `<span class="exlabel">Rate this answer</span>${buttons}`
+    + `<span class="ratethanks">${picked ? "Thanks — recorded." : ""}</span></div>`;
+}
+
+function botInner(d, rating) {
   let html = "";
-  if (!d.ok) return `<p class="answer">${esc(d.error)}</p>`;
+  // A failed answer is worth rating too — "the agent errored" is the clearest signal
+  // there is, and hiding the row here would drop exactly the feedback worth having.
+  if (!d.ok) return `<p class="answer">${esc(d.error)}</p>` + rateBar(rating);
   if (d.value !== null && d.value !== undefined && d.value !== "")
     html += `<div class="badge">${esc(fmtHeadline(d))}</div>`;
   html += `<div class="answer">${mdToHtml(d.answer)}</div>`;
@@ -737,6 +777,7 @@ function botInner(d) {
   }
   html += diagnostics(d);
   html += exportBar(d);
+  html += rateBar(rating);
   return html;
 }
 
@@ -863,8 +904,8 @@ function renderMessage(m, idx) {
     wrap.innerHTML = `<div class="bubble">${esc(m.text)}${att}</div>`;
   } else {
     wrap.className = "msg bot" + (m.data && m.data.ok === false ? " err" : "");
-    wrap.dataset.msgIndex = idx; // so the export buttons can find this answer's payload
-    wrap.innerHTML = `<div class="bubble">${botInner(m.data)}</div>`;
+    wrap.dataset.msgIndex = idx; // so the export/rating buttons can find this answer
+    wrap.innerHTML = `<div class="bubble">${botInner(m.data, m.rating)}</div>`;
   }
   return wrap;
 }
@@ -1039,8 +1080,57 @@ $("#chatList").addEventListener("click", (e) => {
 pdfBtn.addEventListener("click", downloadPdf);
 qEl.addEventListener("input", autosize);
 qEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+// Send one answer's score. The row is keyed by (session_id, turn), so re-rating appends a
+// superseding row rather than editing anything — and the UI stays usable if the write
+// fails, because a rating is telemetry and must never block the chat.
+async function rateAnswer(idx, score, bar) {
+  const m = messages[idx];
+  if (!m) return;
+  const d = m.data || {};
+  const note = bar.querySelector(".ratethanks");
+  bar.querySelectorAll(".ratebtn").forEach((b) => {
+    b.classList.toggle("picked", Number(b.dataset.score) === score);
+  });
+  bar.classList.add("done");
+  note.classList.remove("err");
+  note.textContent = "Saving…";
+  try {
+    const r = await fetch("/api/feedback", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        score,
+        session_id: d.session_id || sessionId || "",
+        turn: idx,
+        route: d.route || null,
+        elapsed_ms: typeof d.elapsed_ms === "number" ? d.elapsed_ms : null,
+        cost_usd: typeof d.cost_usd === "number" ? d.cost_usd : null,
+        question: questionFor(idx),
+      }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || "Could not save rating");
+    m.rating = score;          // so a re-render (and the saved chat) shows the score back
+    persistActive();
+    note.textContent = "Thanks — recorded.";
+  } catch (err) {
+    note.classList.add("err");
+    note.textContent = "Not saved — try again.";
+    bar.classList.remove("done");
+    bar.querySelectorAll(".ratebtn").forEach((b) => {
+      b.classList.toggle("picked", Number(b.dataset.score) === m.rating);
+    });
+  }
+}
+
 threadEl.addEventListener("click", (e) => {
   if (e.target.classList.contains("chip")) { qEl.value = e.target.textContent; autosize(); qEl.focus(); return; }
+  const rate = e.target.closest(".ratebtn");
+  if (rate) {
+    const bot = rate.closest(".msg.bot");
+    const idx = bot ? Number(bot.dataset.msgIndex) : -1;
+    if (idx >= 0) rateAnswer(idx, Number(rate.dataset.score), rate.closest(".ratebar"));
+    return;
+  }
   const ex = e.target.closest(".exbtn");
   if (ex) {
     const bot = ex.closest(".msg.bot");
