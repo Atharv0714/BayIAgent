@@ -233,18 +233,18 @@
   .exbtn.exgen:hover { color: #fff; filter: brightness(1.05); }
 
   /* Per-answer rating: five faces, worst to best, stored server-side as 1-5. */
-  .ratebar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .ratebar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   .ratebtn {
     background: transparent; border: 1px solid transparent; border-radius: 999px;
-    padding: 3px 6px; font-size: 19px; line-height: 1.15; cursor: pointer;
-    filter: grayscale(1); opacity: .45; transition: opacity .12s, filter .12s, transform .12s;
+    padding: 6px 10px; font-size: 30px; line-height: 1.1; cursor: pointer;
+    filter: grayscale(1); opacity: .5; transition: opacity .12s, filter .12s, transform .12s;
   }
-  .ratebtn:hover { filter: grayscale(0); opacity: 1; transform: scale(1.15); }
+  .ratebtn:hover { filter: grayscale(0); opacity: 1; transform: scale(1.18); }
   /* The chosen face stays in colour; the rest fade back so the score reads at a glance. */
   .ratebtn.picked { filter: grayscale(0); opacity: 1; border-color: var(--vborder); background: var(--panel2); }
-  .ratebar.done .ratebtn:not(.picked) { opacity: .25; }
+  .ratebar.done .ratebtn:not(.picked) { opacity: .3; }
   .ratebtn:disabled { cursor: default; transform: none; }
-  .ratethanks { color: var(--muted); font-size: 11.5px; margin-left: 6px; font-family: var(--display); font-weight: 600; }
+  .ratethanks { color: var(--muted); font-size: 12px; margin-left: 8px; font-family: var(--display); font-weight: 600; }
   .ratethanks.err { color: var(--danger); }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
