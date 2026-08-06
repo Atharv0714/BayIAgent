@@ -130,12 +130,27 @@ else
     info "runtime already PYTHON|${PYTHON_VERSION}"
 fi
 
-step "Key Vault: $VAULT_NAME (RBAC authorization)"
-az keyvault create \
-    --name "$VAULT_NAME" --resource-group "$RESOURCE_GROUP" --location "$LOCATION" \
-    --enable-rbac-authorization true \
-    --retention-days 7 -o none 2>/dev/null \
-    || info "already exists — leaving in place"
+step "Key Vault: $VAULT_NAME"
+# NEVER re-run `az keyvault create` against an existing vault. It is an upsert, so
+# passing --enable-rbac-authorization would flip a live access-policy vault to RBAC
+# and instantly revoke the app's access to its own secrets — the running app breaks
+# on the next restart, with a Key Vault reference error that looks like a bad secret.
+#
+# This vault uses ACCESS POLICIES, not RBAC, deliberately: creating RBAC role
+# assignments needs Microsoft.Authorization/roleAssignments/write (Owner or User
+# Access Administrator), and the operator here holds only Contributor on the
+# resource group. Access policies are set on the vault resource itself, which
+# Contributor does cover.
+if az keyvault show --name "$VAULT_NAME" -o none 2>/dev/null; then
+    RBAC_MODE="$(az keyvault show --name "$VAULT_NAME" --query properties.enableRbacAuthorization -o tsv)"
+    info "exists (rbac=$RBAC_MODE) — leaving its authorization model alone"
+else
+    info "creating with access policies"
+    az keyvault create \
+        --name "$VAULT_NAME" --resource-group "$RESOURCE_GROUP" --location "$LOCATION" \
+        --enable-rbac-authorization false \
+        --retention-days 7 -o none
+fi
 VAULT_URI="https://${VAULT_NAME}.vault.azure.net"
 
 step "Managed identity for $APP_NAME"
@@ -145,13 +160,20 @@ PRINCIPAL_ID="$(az webapp identity assign \
 info "principal: $PRINCIPAL_ID"
 
 step "Granting the app read access to vault secrets"
+# get/list only — the app never writes a secret and cannot see keys or certificates.
+# Which mechanism depends on the vault's authorization model (see above): an
+# access-policy vault takes set-policy, an RBAC vault takes a role assignment.
 VAULT_ID="$(az keyvault show --name "$VAULT_NAME" --query id -o tsv)"
-# 'Key Vault Secrets User' = get/list secret VALUES, nothing else. The app never
-# needs to write, and cannot enumerate keys or certificates.
-az role assignment create \
-    --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
-    --role "Key Vault Secrets User" --scope "$VAULT_ID" -o none 2>/dev/null \
-    || info "role assignment already present"
+if [[ "$(az keyvault show --name "$VAULT_NAME" --query properties.enableRbacAuthorization -o tsv)" == "true" ]]; then
+    az role assignment create \
+        --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
+        --role "Key Vault Secrets User" --scope "$VAULT_ID" -o none 2>/dev/null \
+        || info "role assignment already present (or you lack roleAssignments/write)"
+else
+    az keyvault set-policy --name "$VAULT_NAME" --object-id "$PRINCIPAL_ID" \
+        --secret-permissions get list -o none
+    info "access policy set for the app's managed identity"
+fi
 
 # RBAC is eventually consistent. A Key Vault reference evaluated before the grant
 # lands sticks in a failed state until the next restart, which looks exactly like
@@ -233,6 +255,7 @@ az webapp config appsettings set \
     "EASY_AUTH_HEADER=X-MS-CLIENT-PRINCIPAL-NAME" \
     "GROUPS_HEADER=X-MS-CLIENT-PRINCIPAL" \
     "PROTECTED_GROUP=${PROTECTED_GROUP_OBJECT_ID}" \
+    "PROTECTED_USERS=${PROTECTED_USERS:-}" \
     "SCM_DO_BUILD_DURING_DEPLOYMENT=true" \
     "ENABLE_ORYX_BUILD=true" \
     "WEBSITES_ENABLE_APP_SERVICE_STORAGE=true" \

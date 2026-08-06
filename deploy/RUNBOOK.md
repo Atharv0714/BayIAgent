@@ -169,8 +169,21 @@ Two consequences that bite:
 Entra emits group **object IDs**, not display names. `PROTECTED_GROUP` must hold
 a GUID; the literal string `SG-BayI-Sensitive` would never match a claim. That
 group does not currently exist in the tenant, so `PROTECTED_GROUP` is set to an
-all-zeros GUID — no caller ever matches, and protected rows stay unreadable.
-That is fail-closed and deliberate.
+all-zeros GUID — no caller ever matches through the group path. That is
+fail-closed and deliberate.
+
+**`PROTECTED_USERS` is the mechanism actually in use.** Standing up the group needs
+a Groups Administrator to create it *and* the app registration configured to emit
+the groups claim. `PROTECTED_USERS` is a comma-separated allowlist of UPNs, OR'd
+with the group check in `web._caller_is_protected`, and needs only the identity
+sign-in already delivers. Use the exact string `/api/whoami` reports as `identity`
+while signed in — that is `X-MS-CLIENT-PRINCIPAL-NAME`, which is not always the
+mail address you would guess. The comparison lower-cases both sides, because Entra
+does not guarantee UPN casing between tokens.
+
+Moving to a real Entra group later is a config change, not a code change: create
+the group, put its object ID in `PROTECTED_GROUP_OBJECT_ID`, re-run `deploy.sh`.
+Both paths keep working, so it can be done without a cutover.
 
 Past roughly 200 group memberships Entra drops the groups claim entirely and
 substitutes `_claim_names`/`_claim_sources` pointing at Microsoft Graph. The
@@ -206,17 +219,31 @@ this elsewhere (both are documented in that file):
 
 ### Enabling ownership enforcement
 
-`ENFORCE_OWNERSHIP` is `false` (and stays `false` in committed config). The Snowflake
-policy is live, so flipping it is now only gated on **Entra sign-in being verified end
-to end** — a real UPN reaching the app. Until then, with the app on `BAYI_READ` and no
-identity bound, the policy already fails closed: only `internal` rows are visible, so a
-private row would be hidden from *everyone* including its owner until enforcement is on.
+`ENFORCE_OWNERSHIP` is now `true` in `deploy/config.sh`, so `deploy.sh` ships it. Set it
+there, **not** by `az webapp config appsettings set` alone: deploy.sh writes this value on
+every run, so a CLI-only flip is silently reverted by the next deploy.
+
+Before flipping it, prove an identity actually arrives. Once enforcement is on, `/api/ask`
+returns **401 to everyone** if none does. Deploy with it still `false`, sign in, and open
+`/api/whoami`:
+
+```json
+{"ok":true,"enforce":false,"identity":"you@bayone.com","is_protected_member":false,...}
+```
+
+`identity: null` means Easy Auth is enforcing sign-in but not injecting
+`X-MS-CLIENT-PRINCIPAL-NAME` — stop and fix that first. A real string is also the value to
+copy verbatim into `PROTECTED_USERS`.
+
+To turn it off in a hurry (the app keeps working; only per-user scoping stops):
 
 ```bash
 az webapp config appsettings set -n BayIInternalAgent -g BayIAgent \
-    --settings ENFORCE_OWNERSHIP=true
+    --settings ENFORCE_OWNERSHIP=false
 az webapp restart -n BayIInternalAgent -g BayIAgent
 ```
+
+Set it back in `config.sh` too, or the next deploy re-enables it.
 
 ### Verifying isolation
 

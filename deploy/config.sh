@@ -76,9 +76,26 @@ CORTEX_ENABLED="false"
 # docs/sql/02_columns.sql and 03_row_access_policy.sql have also been applied.
 PROTECTED_GROUP_OBJECT_ID="00000000-0000-0000-0000-000000000000"
 
-# Stays false until BOTH are true:
-#   1. Entra sign-in is verified end to end, AND
-#   2. docs/sql/02_columns.sql + 03_row_access_policy.sql have been applied.
-# Without (2) the app sets BAYI_CALLER and no policy reads it — that is not
-# isolation, it only looks like it.
-ENFORCE_OWNERSHIP="false"
+# Named members of the 'protected' tier, comma-separated, OR'd with the group above.
+# This is the mechanism actually in use: the Entra group needs a Groups Administrator to
+# create it AND the app registration configured to emit the groups claim, while this needs
+# only the UPN that sign-in already delivers. Moving to the group later is just filling in
+# PROTECTED_GROUP_OBJECT_ID — no code change, and both keep working.
+#
+# Use the EXACT string /api/whoami reports as "identity" while signed in. It is the UPN
+# Easy Auth puts in X-MS-CLIENT-PRINCIPAL-NAME, which is not always the mail address you
+# would guess. (The comparison is case-insensitive, so casing alone will not break it.)
+# Empty = nobody is in the protected tier, which is the fail-closed direction.
+PROTECTED_USERS=""
+
+# Requires BOTH of these, and both are now true:
+#   1. Entra sign-in verified end to end — the deployed site returns 401 unauthenticated
+#      on /, /api/whoami and /.auth/me, and /api/whoami reports a real UPN once signed in.
+#   2. The governance SQL applied — rap_ownership is ACTIVE on BLOCKS and FACTS, and the
+#      app connects as BAYI_READ (see SNOWFLAKE_ROLE above), which the policy does not
+#      exempt. Without (2) the app would set BAYI_CALLER and no policy would read it —
+#      that is not isolation, it only looks like it.
+#
+# Set here rather than by `az webapp config appsettings set`, because deploy.sh writes this
+# value on every run: flipping it by CLI alone is silently reverted by the next deploy.
+ENFORCE_OWNERSHIP="true"

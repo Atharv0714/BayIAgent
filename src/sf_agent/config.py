@@ -140,13 +140,25 @@ class AuthConfig(BaseSettings):
     protected_session_var: str = Field(
         default="BAYI_PROTECTED", validation_alias="PROTECTED_SESSION_VAR"
     )
+    # Named members of the protected tier, comma-separated, as an alternative to the
+    # Entra group above. A group is the right long-term answer, but standing one up needs
+    # a Groups Administrator to create it AND the app registration configured to emit the
+    # groups claim; this needs one app setting and works the moment sign-in delivers a
+    # UPN. The two are OR'd (see web._caller_is_protected), so moving to a real group
+    # later is a config change, not a code change. NOT a dev-only fallback — this is
+    # server-trusted config, and the caller's identity still comes from the platform.
+    protected_users: str | None = Field(
+        default=None, validation_alias="PROTECTED_USERS"
+    )
     # Local fallback group list (comma-separated) used when groups_header is absent
     # (dev only). Set to include protected_group to test protected ingest/queries.
     dev_caller_groups: str | None = Field(
         default=None, validation_alias="DEV_CALLER_GROUPS"
     )
 
-    @field_validator("dev_caller_identity", "dev_caller_groups", mode="before")
+    @field_validator(
+        "dev_caller_identity", "dev_caller_groups", "protected_users", mode="before"
+    )
     @classmethod
     def _blank_to_none(cls, v: object) -> object:
         if isinstance(v, str) and v.strip() == "":
@@ -159,6 +171,19 @@ class AuthConfig(BaseSettings):
         if not self.dev_caller_groups:
             return []
         return [g.strip() for g in self.dev_caller_groups.split(",") if g.strip()]
+
+    @property
+    def protected_user_list(self) -> list[str]:
+        """protected_users parsed into a stripped, non-empty, LOWER-CASED list.
+
+        Lower-cased because the comparison against the caller's identity has to be
+        case-insensitive: Entra does not guarantee the casing of the UPN it puts in
+        X-MS-CLIENT-PRINCIPAL-NAME, and a case difference silently costing someone their
+        protected access would be near-impossible to diagnose from the outside.
+        """
+        if not self.protected_users:
+            return []
+        return [u.strip().lower() for u in self.protected_users.split(",") if u.strip()]
 
 
 class AgentConfig(BaseSettings):

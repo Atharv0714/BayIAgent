@@ -115,6 +115,12 @@ class _State:
     # ingest_id -> {"sensitivity", "ingested_by"} stamped server-side at structure time
     # and applied at commit, so the owner tag can't be forged by the committing client.
     pending_meta: dict[str, dict[str, Any]] = {}
+    # ingest_id -> the identity that structured it, or None when none was resolved. The
+    # preview endpoints hand back the full blocks/facts, so without this a second signed-in
+    # user holding an ingest_id could read another user's in-flight PROTECTED payload —
+    # the tier's whole promise — and commit or delete it. Same contract as
+    # conversation_owners/upload_owners: None means unowned and stays open.
+    pending_owners: dict[str, str | None] = {}
     # Per-owner enforcement config. Defaults keep today's behavior (no binding, all
     # rows shared) until the docs/sql migration is applied and ENFORCE_OWNERSHIP=true.
     auth_config: AuthConfig | None = None
@@ -184,6 +190,15 @@ def _forbidden() -> JSONResponse:
     leaked id that they found something real. Indistinguishable from an expired id.
     """
     return JSONResponse({"ok": False, "error": "Not found."}, status_code=404)
+
+
+def _owns_pending(ingest_id: str, request: Request) -> bool:
+    """May this caller touch the pending ingest under ``ingest_id``?
+
+    Same contract as conversations and uploads: an ingest structured with no resolved
+    identity is unowned and stays open, so nothing changes where there is no sign-in.
+    """
+    return _owns(STATE.pending_owners.get(ingest_id), _session_owner(request))
 
 
 def _remember_conversation(session_id: str, messages: list[Any], owner: str | None) -> None:
@@ -314,11 +329,25 @@ def _caller_groups(request: Request) -> list[str]:
 
 
 def _caller_is_protected(request: Request) -> bool:
-    """True when the caller belongs to the single privileged group that may read and
-    author 'protected' data. Decided per request from the group claim — never row data."""
+    """True when the caller may read and author 'protected' data.
+
+    Two independent sources, OR'd. A named allowlist (``PROTECTED_USERS``) settles the
+    common case where the tier has a handful of members and no Entra group exists yet;
+    the group claim remains the scaling answer. Both are server-side config against a
+    platform-supplied identity — nothing here reads client input or row data.
+
+    Fails closed at every step: no config, no resolved identity, or an unreadable group
+    claim all yield False.
+    """
     cfg = STATE.auth_config
     if cfg is None:
         return False
+    allowlist = cfg.protected_user_list
+    if allowlist:
+        identity = _caller_identity(request)
+        # Case-insensitive: Entra does not guarantee UPN casing between tokens.
+        if identity and identity.strip().lower() in allowlist:
+            return True
     return cfg.protected_group in _caller_groups(request)
 
 
@@ -763,6 +792,10 @@ async def ingest_structure(
         STATE.pending_meta[ingest_id] = {
             "ingested_by": ingested_by if sensitivity != "internal" else None,
         }
+        # The ACCESS owner, distinct from the ingested_by stamp above: that one is None for
+        # an internal ingest so the rows stay unowned, but the draft is still this caller's
+        # to preview and commit.
+        STATE.pending_owners[ingest_id] = ingested_by
         # Persist as a draft immediately so leaving without confirming keeps the work —
         # unless this is an ingest-only run, in which case nothing is written to disk.
         created_at = (
@@ -804,6 +837,8 @@ def ingest_edit(req: EditRequest, request: Request) -> JSONResponse:
     Per-row tiers are gated exactly like /structure: any private/protected row needs a
     resolved identity (401); any protected row needs privileged-group membership (403).
     """
+    if not _owns_pending(req.ingest_id, request):
+        return _forbidden()
     with _LOCK:
         current = STATE.pending_ingests.get(req.ingest_id)
     if current is None:
@@ -981,6 +1016,8 @@ def ingest_instruct(req: InstructRequest, request: Request) -> JSONResponse:
     if STATE.anthropic_client is None or STATE.agent_config is None:
         return JSONResponse({"ok": False, "error": "The editor model is not available."}, status_code=503)
 
+    if not _owns_pending(req.ingest_id, request):
+        return _forbidden()
     with _LOCK:
         current = STATE.pending_ingests.get(req.ingest_id)
     if current is None:
@@ -1059,8 +1096,10 @@ def ingest_drafts_list() -> JSONResponse:
 
 
 @app.get("/api/ingest/drafts/{ingest_id}")
-def ingest_draft_get(ingest_id: str) -> JSONResponse:
+def ingest_draft_get(ingest_id: str, request: Request) -> JSONResponse:
     """Full stored record, shaped like /structure so the UI can re-render its preview."""
+    if not _owns_pending(ingest_id, request):
+        return _forbidden()
     record = ingest_drafts.get(_DRAFTS_DIR, ingest_id)
     if record is None:
         return JSONResponse({"ok": False, "error": "Record not found."}, status_code=404)
@@ -1096,18 +1135,23 @@ def ingest_draft_get(ingest_id: str) -> JSONResponse:
 
 
 @app.delete("/api/ingest/drafts/{ingest_id}")
-def ingest_draft_delete(ingest_id: str) -> JSONResponse:
+def ingest_draft_delete(ingest_id: str, request: Request) -> JSONResponse:
     """Delete a history record (removes the file and any in-memory pending payload)."""
+    if not _owns_pending(ingest_id, request):
+        return _forbidden()
     with _LOCK:
         STATE.pending_ingests.pop(ingest_id, None)
         STATE.pending_meta.pop(ingest_id, None)
+        STATE.pending_owners.pop(ingest_id, None)
         existed = ingest_drafts.delete(_DRAFTS_DIR, ingest_id)
     return JSONResponse({"ok": True, "deleted": existed})
 
 
 @app.post("/api/ingest/commit")
-def ingest_commit(req: CommitRequest) -> JSONResponse:
+def ingest_commit(req: CommitRequest, request: Request) -> JSONResponse:
     """Load a previously structured, server-held payload into Snowflake."""
+    if not _owns_pending(req.ingest_id, request):
+        return _forbidden()
     if STATE.ingest_connection is None:
         reason = STATE.ingest_error or "ingest connection not configured"
         return JSONResponse({"ok": False, "error": f"Commit unavailable: {reason}"}, status_code=503)
@@ -1153,6 +1197,7 @@ def ingest_commit(req: CommitRequest) -> JSONResponse:
             )
             STATE.pending_ingests.pop(req.ingest_id, None)
             STATE.pending_meta.pop(req.ingest_id, None)
+            STATE.pending_owners.pop(req.ingest_id, None)
             # Ingest-only runs were never written to disk, so there's no draft file to
             # flip — mark_committed no-ops and returns False, leaving nothing behind.
             kept_history = ingest_drafts.mark_committed(
