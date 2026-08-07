@@ -95,7 +95,7 @@ PROTECTED_GROUP_OBJECT_ID="00000000-0000-0000-0000-000000000000"
 # Easy Auth puts in X-MS-CLIENT-PRINCIPAL-NAME, which is not always the mail address you
 # would guess. (The comparison is case-insensitive, so casing alone will not break it.)
 # Empty = nobody is in the protected tier, which is the fail-closed direction.
-PROTECTED_USERS=""
+PROTECTED_USERS="asharma3@bayone.com"
 
 # Requires BOTH of these, and both are now true:
 #   1. Entra sign-in verified end to end — the deployed site returns 401 unauthenticated
