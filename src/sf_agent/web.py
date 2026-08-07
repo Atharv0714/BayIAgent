@@ -613,13 +613,36 @@ def whoami(request: Request) -> JSONResponse:
     entirely (there's no binding, so marking data private/protected would be a no-op)."""
     auth = STATE.auth_config
     enforce = bool(auth and auth.enforce_ownership)
+    identity = _caller_identity(request)
+    member = _caller_is_protected(request)
+
+    # Why the answer above is what it is. Without this, a protected tier that silently does
+    # not work is a mystery: the likeliest cause by far is that PROTECTED_USERS holds the
+    # address someone expected rather than the UPN Easy Auth actually sends, and the two
+    # can differ. Reporting the route taken — and, when there is no match, that an allowlist
+    # is even configured — turns that into a glance. Deliberately does NOT echo the
+    # allowlist itself: a caller learns their own standing, not who else is on it.
+    if not auth:
+        via = None
+    elif member and identity and identity.strip().lower() in auth.protected_user_list:
+        via = "allowlist"
+    elif member:
+        via = "group"
+    elif not identity:
+        via = "no identity resolved"
+    elif auth.protected_user_list:
+        via = "identity did not match the configured allowlist"
+    else:
+        via = "no allowlist configured; not in the group"
+
     return JSONResponse(
         {
             "ok": True,
             "enforce": enforce,
-            "identity": _caller_identity(request),
-            "is_protected_member": _caller_is_protected(request),
+            "identity": identity,
+            "is_protected_member": member,
             "protected_group": auth.protected_group if auth else None,
+            "protected_via": via,
         }
     )
 
@@ -1253,19 +1276,27 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
         )
 
     # When enforcement is on, resolve the caller's identity (Easy Auth header / dev
-    # override) and require it — without one we can't scope private rows, so refuse
-    # rather than silently show a broad view. Also resolve protected-group membership,
-    # which decides whether this query may see the group-scoped 'protected' tier.
+    # override) and their protected-group membership; together these decide which private
+    # and protected rows this query may see.
+    #
+    # An unresolved identity DEGRADES to shared-only rather than refusing. Refusing looks
+    # safer but is not, in this deployment: Easy Auth already blocks anonymous visitors at
+    # the platform, so this branch is reached by a misconfiguration — authenticated, header
+    # not arriving — where a 401 would take the app down for every user at once. Serving
+    # only the 'internal' tier keeps it working while private and protected stay invisible,
+    # which is the same fail-closed data scoping either way.
     auth = STATE.auth_config
     identity: str | None = None
     is_protected = False
     if auth is not None and auth.enforce_ownership:
         identity = _caller_identity(request)
+        is_protected = bool(identity) and _caller_is_protected(request)
         if not identity:
-            return JSONResponse(
-                {"ok": False, "error": "Authentication required."}, status_code=401
+            logger.error(
+                "web: enforcement is ON but no identity resolved from %r — serving shared "
+                "rows only. Check that Easy Auth is injecting that header.",
+                auth.easy_auth_header,
             )
-        is_protected = _caller_is_protected(request)
 
     # Resolve an attached file. A "context" upload's prebuilt content block rides with the
     # question so the model reads it; a "template" upload is carried through to the deck
@@ -1324,9 +1355,15 @@ def ask(req: AskRequest, request: Request) -> JSONResponse:
             # variables the row-access policy reads, so this query returns internal rows,
             # this user's private rows, and (only for a group member) protected rows.
             # Safe on the shared read connection because _LOCK serializes every request.
-            if identity is not None and STATE.connection is not None:
+            #
+            # The unresolved-identity case MUST bind too, clearing the variables rather
+            # than skipping. One read connection is shared by everyone, so leaving them
+            # alone would let this query inherit the PREVIOUS caller's BAYI_CALLER and
+            # return their private rows to somebody the app could not even identify —
+            # turning a graceful degradation into the exact leak the policy exists to stop.
+            if auth is not None and auth.enforce_ownership and STATE.connection is not None:
                 STATE.connection.bind_session({  # type: ignore[union-attr]
-                    auth.caller_session_var: identity,
+                    auth.caller_session_var: identity,  # None -> UNSET, matches nothing
                     auth.protected_session_var: "true" if is_protected else "false",
                 })
             history = STATE.conversations.get(session_id, [])

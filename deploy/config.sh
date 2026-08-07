@@ -82,6 +82,15 @@ PROTECTED_GROUP_OBJECT_ID="00000000-0000-0000-0000-000000000000"
 # only the UPN that sign-in already delivers. Moving to the group later is just filling in
 # PROTECTED_GROUP_OBJECT_ID — no code change, and both keep working.
 #
+# LEFT EMPTY ON PURPOSE — this repo is public. Naming the account with elevated access to
+# the protected tier tells a reader exactly which identity to target, so the value is passed
+# at deploy time and lives only in the Azure app settings:
+#
+#   PROTECTED_USERS=someone@bayone.com bash deploy/deploy.sh
+#
+# deploy.sh reads it from the environment, so an inline value ships normally. Re-run with it
+# set whenever the membership changes; omitting it on a later run would clear the tier.
+#
 # Use the EXACT string /api/whoami reports as "identity" while signed in. It is the UPN
 # Easy Auth puts in X-MS-CLIENT-PRINCIPAL-NAME, which is not always the mail address you
 # would guess. (The comparison is case-insensitive, so casing alone will not break it.)

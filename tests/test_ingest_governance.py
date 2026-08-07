@@ -225,3 +225,82 @@ def test_an_unowned_pending_ingest_stays_open():
     unaffected, exactly as for conversations and uploads."""
     _seed_pending("i1", None, tier="internal")
     assert ingest_draft_delete("i1", _request(None)).status_code == 200
+
+
+# --- an unresolved identity degrades, and must not inherit the previous caller ---------
+# With enforcement on, a request whose identity cannot be resolved is served with the
+# shared tier only rather than refused: Easy Auth already blocks anonymous visitors at the
+# platform, so this branch means "authenticated, header not arriving" — a misconfiguration
+# where a 401 would take the app down for everyone at once.
+#
+# The danger is the shared read connection. One connection serves every request, so
+# skipping the bind would leave the PREVIOUS caller's BAYI_CALLER in place and hand their
+# private rows to somebody the app could not even identify. Degrading has to CLEAR the
+# variables, not leave them alone.
+
+class _RecordingConn:
+    """Stands in for the shared Snowflake connection, recording what gets bound."""
+
+    def __init__(self):
+        self.binds: list[dict] = []
+
+    def bind_session(self, variables):
+        self.binds.append(dict(variables))
+
+
+def _ask_binds(identity, monkeypatch):
+    """Run /api/ask far enough to capture the session bind, then stop."""
+    from sf_agent import web
+
+    conn = _RecordingConn()
+    monkeypatch.setattr(web.STATE, "connection", conn)
+    # Fail the turn immediately after the bind: the agent is irrelevant to what we assert.
+    monkeypatch.setitem(
+        web.STATE.agents, "run_sql",
+        type("A", (), {"route_and_answer": lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop"))})(),
+    )
+    web.ask(web.AskRequest(question="anything", tool="run_sql"), _request(identity))
+    return conn.binds
+
+
+def test_an_unresolved_identity_clears_the_session_rather_than_inheriting_it(monkeypatch):
+    binds = _ask_binds(None, monkeypatch)
+    assert binds, "no bind happened at all — the next query would inherit the last caller"
+    assert binds[-1] == {"BAYI_CALLER": None, "BAYI_PROTECTED": "false"}
+
+
+def test_a_resolved_identity_binds_that_caller(monkeypatch):
+    assert _ask_binds(OUTSIDER, monkeypatch)[-1] == {
+        "BAYI_CALLER": OUTSIDER, "BAYI_PROTECTED": "false"
+    }
+
+
+def test_a_protected_member_binds_the_protected_flag(monkeypatch):
+    assert _ask_binds(MEMBER, monkeypatch)[-1] == {
+        "BAYI_CALLER": MEMBER, "BAYI_PROTECTED": "true"
+    }
+
+
+def test_an_unresolved_identity_is_never_treated_as_a_protected_member(monkeypatch):
+    """Belt and braces: shared-only must not accidentally mean group-scoped rows too."""
+    STATE.auth_config = _auth(protected_users=None, dev_caller_groups=GROUP_ID)
+    assert _ask_binds(None, monkeypatch)[-1]["BAYI_PROTECTED"] == "false"
+
+
+# --- the diagnostic that makes a UPN mismatch findable ---------------------------------
+
+def test_whoami_explains_why_someone_is_or_is_not_a_member():
+    """A protected tier that silently does not work is a mystery; the likeliest cause is
+    PROTECTED_USERS holding a different string than the UPN Easy Auth actually sends."""
+    assert _body(whoami(_request(MEMBER)))["protected_via"] == "allowlist"
+    assert "did not match" in _body(whoami(_request(OUTSIDER)))["protected_via"]
+    assert _body(whoami(_request(None)))["protected_via"] == "no identity resolved"
+
+    STATE.auth_config = _auth(protected_users=None, groups_header="X-MS-CLIENT-GROUPS")
+    assert _body(whoami(_request(OUTSIDER, groups=GROUP_ID)))["protected_via"] == "group"
+
+
+def test_whoami_does_not_echo_the_allowlist():
+    """A caller learns their OWN standing, not who else is on the list."""
+    body = _body(whoami(_request(OUTSIDER)))
+    assert MEMBER not in json.dumps(body)

@@ -223,17 +223,29 @@ this elsewhere (both are documented in that file):
 there, **not** by `az webapp config appsettings set` alone: deploy.sh writes this value on
 every run, so a CLI-only flip is silently reverted by the next deploy.
 
-Before flipping it, prove an identity actually arrives. Once enforcement is on, `/api/ask`
-returns **401 to everyone** if none does. Deploy with it still `false`, sign in, and open
-`/api/whoami`:
+An unresolved identity DEGRADES to the shared tier rather than returning 401. Easy Auth
+already blocks anonymous visitors at the platform, so that branch means "authenticated,
+header not arriving" — a misconfiguration where refusing would take the app down for every
+user at once. The request is served with `BAYI_CALLER` explicitly UNSET and
+`BAYI_PROTECTED='false'`, so private and protected rows stay invisible; an error is logged
+naming the header to check. The bind is what makes this safe: skipping it would leave the
+previous caller's identity on the shared read connection.
+
+To confirm sign-in is wired correctly, sign in and open `/api/whoami`:
 
 ```json
 {"ok":true,"enforce":false,"identity":"you@bayone.com","is_protected_member":false,...}
 ```
 
 `identity: null` means Easy Auth is enforcing sign-in but not injecting
-`X-MS-CLIENT-PRINCIPAL-NAME` — stop and fix that first. A real string is also the value to
-copy verbatim into `PROTECTED_USERS`.
+`X-MS-CLIENT-PRINCIPAL-NAME`. The app still works (shared tier only), but private and
+protected are unreachable until it is fixed.
+
+`protected_via` says why membership resolved the way it did — `allowlist`, `group`,
+`no identity resolved`, or `identity did not match the configured allowlist`. That last one
+is the common failure: `PROTECTED_USERS` holds the address someone expected rather than the
+UPN Easy Auth actually sends. Compare it against `identity` in the same response and fix
+`deploy/config.sh`.
 
 To turn it off in a hurry (the app keeps working; only per-user scoping stops):
 
